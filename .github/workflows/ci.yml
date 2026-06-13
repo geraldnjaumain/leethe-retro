@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: leethe_ci
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d leethe_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate idempotent database migrations
+        run: |
+          docker run --rm --network host \
+            --env DATABASE_URL \
+            --volume "$PWD:/repo:ro" \
+            postgres:17-alpine sh -ec '
+              for pass in 1 2; do
+                for migration in /repo/migrations/*.sql; do
+                  psql "$DATABASE_URL" --set ON_ERROR_STOP=1 --file "$migration"
+                done
+              done
+              psql "$DATABASE_URL" --set ON_ERROR_STOP=1 \
+                --command "SELECT 1 FROM media_titles, job_leases, tmdb_payload_cache LIMIT 1;"
+            '
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/leethe_ci
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm audit --omit=dev --audit-level=high
+      - run: docker build -t leethe:${{ github.sha }} .

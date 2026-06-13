@@ -1,0 +1,53 @@
+name: Production maintenance
+
+on:
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: production-database-write
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  maintain:
+    environment: production
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --omit=dev
+      - name: Apply migrations
+        run: npm run db:migrate
+        env:
+          DATABASE_ADMIN_URL: ${{ secrets.DATABASE_ADMIN_URL }}
+      - name: Reconcile application privileges
+        run: npm run db:apply-app-privileges
+        env:
+          DATABASE_ADMIN_URL: ${{ secrets.DATABASE_ADMIN_URL }}
+      - name: Refresh catalog
+        run: node scripts/refresh-catalog.mjs
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
+          CATALOG_REFRESH_PAGES: "5"
+      - name: Enforce retention
+        run: npm run db:cleanup
+        env:
+          DATABASE_ADMIN_URL: ${{ secrets.DATABASE_ADMIN_URL }}
+      - name: Verify database invariants
+        run: npm run db:verify
+        env:
+          DATABASE_ADMIN_URL: ${{ secrets.DATABASE_ADMIN_URL }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      - name: Verify production readiness
+        run: curl --fail --retry 3 --retry-delay 5 --max-time 20 "${PRODUCTION_URL%/}/readyz?strict=1"
+        env:
+          PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}

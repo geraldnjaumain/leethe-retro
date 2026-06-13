@@ -1,0 +1,12 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+.leethe-db
+.tanstack
+coverage
+dist
+node_modules
+test-results
+*.log

@@ -1,0 +1,18 @@
+{
+  "name": "Leethe",
+  "short_name": "Leethe",
+  "description": "A clean movie and series streaming experience.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#11151d",
+  "theme_color": "#11151d",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "64x64",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

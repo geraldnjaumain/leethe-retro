@@ -1,0 +1,9 @@
+{
+    "ok":  true,
+    "run_dir":  "C:\\Users\\10058\\OneDrive\\Pictures\\leethe-retro-stream-main\\pet-runs\\reel",
+    "spritesheet":  "C:\\Users\\10058\\OneDrive\\Pictures\\leethe-retro-stream-main\\pet-runs\\reel\\final\\spritesheet.webp",
+    "validation":  "C:\\Users\\10058\\OneDrive\\Pictures\\leethe-retro-stream-main\\pet-runs\\reel\\final\\validation.json",
+    "contact_sheet":  "C:\\Users\\10058\\OneDrive\\Pictures\\leethe-retro-stream-main\\pet-runs\\reel\\qa\\contact-sheet.png",
+    "review":  "C:\\Users\\10058\\OneDrive\\Pictures\\leethe-retro-stream-main\\pet-runs\\reel\\qa\\review.json",
+    "package":  "C:\\Users\\10058\\.codex\\pets\\reel"
+}

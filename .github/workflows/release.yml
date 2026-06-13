@@ -1,0 +1,117 @@
+name: Release container
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: production-database-write
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main'
+    environment: production
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      DEPLOY_HOOK_URL: ${{ secrets.DEPLOY_HOOK_URL }}
+      ROLLBACK_HOOK_URL: ${{ secrets.ROLLBACK_HOOK_URL }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - name: Normalize container image name
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: leethe-release-smoke:${{ github.event.workflow_run.head_sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke test release image
+        run: |
+          docker run --detach --name leethe-release --publish 3000:3000 \
+            leethe-release-smoke:${{ github.event.workflow_run.head_sha }}
+          trap 'docker rm --force leethe-release >/dev/null 2>&1 || true' EXIT
+          for attempt in {1..20}; do
+            curl --fail --max-time 5 http://127.0.0.1:3000/healthz && exit 0
+            sleep 2
+          done
+          docker logs leethe-release
+          exit 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --omit=dev
+      - name: Apply production migrations
+        run: npm run db:migrate
+        env:
+          DATABASE_ADMIN_URL: ${{ secrets.DATABASE_ADMIN_URL }}
+      - name: Reconcile application privileges
+        run: npm run db:apply-app-privileges
+        env:
+          DATABASE_ADMIN_URL: ${{ secrets.DATABASE_ADMIN_URL }}
+      - name: Verify database invariants
+        run: npm run db:verify
+        env:
+          DATABASE_ADMIN_URL: ${{ secrets.DATABASE_ADMIN_URL }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Preserve previous release
+        run: |
+          if docker pull "$IMAGE:latest"; then
+            docker tag "$IMAGE:latest" "$IMAGE:previous"
+            docker push "$IMAGE:previous"
+          else
+            echo "No previous release exists yet."
+          fi
+      - name: Publish smoke-tested image
+        run: |
+          docker tag "leethe-release-smoke:${{ github.event.workflow_run.head_sha }}" "$IMAGE:${{ github.event.workflow_run.head_sha }}"
+          docker tag "leethe-release-smoke:${{ github.event.workflow_run.head_sha }}" "$IMAGE:latest"
+          docker push "$IMAGE:${{ github.event.workflow_run.head_sha }}"
+          docker push "$IMAGE:latest"
+      - name: Trigger platform deployment
+        id: deploy
+        if: env.DEPLOY_HOOK_URL != ''
+        run: |
+          curl --fail --retry 3 --request POST "$DEPLOY_HOOK_URL"
+          echo "triggered=true" >> "$GITHUB_OUTPUT"
+      - name: Verify deployed production
+        if: vars.PRODUCTION_URL != ''
+        run: |
+          for attempt in {1..20}; do
+            curl --fail --max-time 20 "${PRODUCTION_URL%/}/readyz?strict=1" && exit 0
+            sleep 15
+          done
+          exit 1
+        env:
+          PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
+      - name: Trigger failed-deployment rollback
+        if: failure() && steps.deploy.outputs.triggered == 'true' && env.ROLLBACK_HOOK_URL != ''
+        run: curl --fail --retry 3 --request POST "$ROLLBACK_HOOK_URL"
+      - name: Verify rollback readiness
+        if: failure() && steps.deploy.outputs.triggered == 'true' && env.ROLLBACK_HOOK_URL != '' && vars.PRODUCTION_URL != ''
+        run: |
+          for attempt in {1..20}; do
+            curl --fail --max-time 20 "${PRODUCTION_URL%/}/readyz?strict=1" && exit 0
+            sleep 15
+          done
+          exit 1
+        env:
+          PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}

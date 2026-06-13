@@ -1,0 +1,70 @@
+name: Database backup
+
+on:
+  schedule:
+    - cron: "11 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-database-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    environment: production
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: restore_test
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d restore_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Create compressed Postgres backup
+        run: >-
+          docker run --rm --network host
+          -e DATABASE_ADMIN_URL
+          -v "$PWD:/backup"
+          postgres:17-alpine
+          pg_dump "$DATABASE_ADMIN_URL" --format=custom --no-owner --no-privileges
+          --file=/backup/leethe.dump
+        env:
+          DATABASE_ADMIN_URL: ${{ secrets.DATABASE_ADMIN_URL }}
+      - name: Restore backup into isolated Postgres
+        run: >-
+          docker run --rm --network host
+          -v "$PWD:/backup"
+          postgres:17-alpine
+          pg_restore --dbname=postgresql://postgres:postgres@localhost:5432/restore_test
+          --clean --if-exists --no-owner --no-privileges /backup/leethe.dump
+      - name: Verify restored schema and data
+        run: >-
+          docker run --rm --network host
+          postgres:17-alpine
+          psql postgresql://postgres:postgres@localhost:5432/restore_test
+          --set ON_ERROR_STOP=1
+          --command "SELECT 1 / CASE WHEN
+          (SELECT count(*) FROM schema_migrations WHERE name <> '__migration_lock__') >= 5 AND
+          (SELECT count(*) FROM media_titles) > 0 AND
+          to_regclass('public.job_leases') IS NOT NULL AND
+          to_regclass('public.tmdb_payload_cache') IS NOT NULL AND
+          to_regclass('public.support_tickets') IS NOT NULL AND
+          to_regclass('public.analytics_events') IS NOT NULL
+          THEN 1 ELSE 0 END AS restore_verified;"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: leethe-database-${{ github.run_id }}
+          path: leethe.dump
+          retention-days: 14
+          if-no-files-found: error

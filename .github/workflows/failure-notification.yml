@@ -1,0 +1,45 @@
+name: Production failure notification
+
+on:
+  workflow_run:
+    workflows:
+      - Catalog retention cleanup
+      - Database backup
+      - Database migration
+      - Production maintenance
+      - Production uptime
+      - Release container
+      - Security audit
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    if: github.event.workflow_run.conclusion != 'success'
+    environment: production
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+    steps:
+      - name: Send failure alert
+        if: env.ALERT_WEBHOOK_URL != ''
+        run: |
+          payload="$(jq --null-input \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg workflow "$WORKFLOW" \
+            --arg conclusion "$CONCLUSION" \
+            --arg url "$RUN_URL" \
+            --arg sha "$HEAD_SHA" \
+            '{repository: $repository, workflow: $workflow, conclusion: $conclusion, url: $url, sha: $sha}')"
+          curl --fail --retry 3 --retry-all-errors \
+            --header "content-type: application/json" \
+            --data "$payload" \
+            "$ALERT_WEBHOOK_URL"
+        env:
+          WORKFLOW: ${{ github.event.workflow_run.name }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}

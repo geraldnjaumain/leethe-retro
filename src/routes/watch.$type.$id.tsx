@@ -10,19 +10,23 @@ import {
   type ButtonHTMLAttributes,
   type ReactNode,
 } from "react";
-import { LogoDot } from "@/components/leethe/Nav";
+import { MediaGlyph, MediaPlaceholder } from "@/components/leethe/VisualAssets";
 import { SelectMenu } from "@/components/leethe/SelectMenu";
 import { StarGlyph } from "@/components/leethe/PosterCard";
 import { recordClientEvent } from "@/lib/product-telemetry";
 import {
+  DEFAULT_PLAYBACK_PREFERENCES,
   audioKey,
   downloadFileName,
   findPreferredStreamIndex,
   isDirectDownload,
   looksLikeSrt,
+  nextEpisodeTarget,
+  normalizePlaybackPreferences,
   normalizeCaptionCandidates,
   srtToVtt,
   type CaptionCandidate,
+  type PlaybackPreferences,
 } from "@/lib/player-media";
 import {
   proxySubtitle,
@@ -49,6 +53,8 @@ type WatchSearch = {
   e?: number;
 };
 
+const PLAYBACK_PREFERENCES_KEY = "leethe:playback-preferences";
+
 type StreamLink = {
   url: string;
   resolution: number;
@@ -64,6 +70,14 @@ type StreamLink = {
   languageCode?: string;
   resourceId?: string;
   extCaptions?: unknown[];
+};
+
+type EpisodeDownloadOption = {
+  url: string;
+  quality: string;
+  resolution: number;
+  audioLabel?: string;
+  size?: number;
 };
 
 type StoredWatchMemory = {
@@ -367,12 +381,23 @@ function WatchPage() {
   const [hlsQualityChoice, setHlsQualityChoice] = useState("auto");
   const [hlsAudioChoice, setHlsAudioChoice] = useState("");
   const [subtitleChoice, setSubtitleChoice] = useState("off");
-  const streamError =
+  const [playbackPreferences, setPlaybackPreferences] = useState<PlaybackPreferences>(
+    DEFAULT_PLAYBACK_PREFERENCES,
+  );
+  const [nextEpisodeCountdown, setNextEpisodeCountdown] = useState<number | null>(null);
+  const [playbackError, setPlaybackError] = useState("");
+  const resolverError =
     streamQuery.error instanceof Error
       ? streamQuery.error.message
       : streamQuery.data && !streamQuery.data.success
         ? streamQuery.data.error || "No playable stream was found."
         : "";
+  const streamError = playbackError || resolverError;
+
+  useEffect(() => {
+    const stored = readJson<PlaybackPreferences>(PLAYBACK_PREFERENCES_KEY);
+    if (stored) setPlaybackPreferences(normalizePlaybackPreferences(stored));
+  }, []);
 
   useEffect(() => {
     if (mediaType !== "tv" || !waitingForRememberedEpisode) return;
@@ -416,6 +441,7 @@ function WatchPage() {
     setHlsQualityChoice("auto");
     setHlsAudioChoice("");
     setSubtitleChoice(readJson<string>(subtitlePreferenceKey(progressKey)) || "off");
+    setPlaybackError("");
   }, [activeSourceUrl, progressKey]);
 
   useEffect(() => {
@@ -425,42 +451,79 @@ function WatchPage() {
 
   const markerQuery = useSkipMarkers(mediaType, id, activeSeason, activeEpisode);
 
+  const nextTarget = useMemo(
+    () =>
+      mediaType === "tv"
+        ? nextEpisodeTarget(
+            activeSeason,
+            activeEpisode,
+            seasonQuery.data?.episodes ?? [],
+            detailQuery.data?.seasons ?? [],
+          )
+        : null,
+    [activeEpisode, activeSeason, detailQuery.data?.seasons, mediaType, seasonQuery.data?.episodes],
+  );
+  const nextTargetLabel = nextTarget
+    ? `Season ${nextTarget.season}, Episode ${nextTarget.episode}`
+    : "Next episode";
+
+  const updatePlaybackPreferences = useCallback((patch: Partial<PlaybackPreferences>) => {
+    setPlaybackPreferences((current) => {
+      const next = normalizePlaybackPreferences({ ...current, ...patch });
+      writeJson(PLAYBACK_PREFERENCES_KEY, next);
+      return next;
+    });
+  }, []);
+
+  const goToNextEpisode = useCallback(() => {
+    if (!nextTarget) return;
+    setNextEpisodeCountdown(null);
+    void navigate({
+      to: "/watch/$type/$id",
+      params: { type: "tv", id },
+      search: { s: nextTarget.season, e: nextTarget.episode },
+    });
+  }, [id, navigate, nextTarget]);
+
   const handleEnded = useCallback(() => {
-    if (mediaType !== "tv") return;
-    const currentSeasonData = seasonQuery.data;
-    if (!currentSeasonData || !activeEpisode) return;
-
-    const episodes = currentSeasonData.episodes || [];
-    const currentIndex = episodes.findIndex((e) => e.episode_number === activeEpisode);
-
-    if (currentIndex >= 0 && currentIndex < episodes.length - 1) {
-      const nextEpisode = episodes[currentIndex + 1];
-      void navigate({
-        to: "/watch/$type/$id",
-        params: { type: "tv", id },
-        search: { s: activeSeason, e: nextEpisode.episode_number },
-      });
-    } else {
-      const seasons = detailQuery.data?.seasons || [];
-      const currentSeasonIndex = seasons.findIndex((s) => s.season_number === activeSeason);
-      if (currentSeasonIndex >= 0 && currentSeasonIndex < seasons.length - 1) {
-        const nextSeason = seasons[currentSeasonIndex + 1];
-        void navigate({
-          to: "/watch/$type/$id",
-          params: { type: "tv", id },
-          search: { s: nextSeason.season_number, e: 1 },
-        });
-      }
+    if (mediaType === "tv" && nextTarget && playbackPreferences.autoplayNext) {
+      setNextEpisodeCountdown(8);
     }
-  }, [
-    activeEpisode,
-    activeSeason,
-    detailQuery.data?.seasons,
-    id,
-    mediaType,
-    navigate,
-    seasonQuery.data,
-  ]);
+  }, [mediaType, nextTarget, playbackPreferences.autoplayNext]);
+
+  const handlePlaybackFailure = useCallback(() => {
+    if (sourceIndex + 1 < streams.length) {
+      setSourceIndex(sourceIndex + 1);
+      return;
+    }
+    const onlyHevc = streams.every((stream) =>
+      /\bhevc\b|\bh\.?265\b|\/h265\//i.test(
+        [stream.codecName, stream.title, stream.url].filter(Boolean).join(" "),
+      ),
+    );
+    setPlaybackError(
+      onlyHevc
+        ? "The provider returned only HEVC sources, which this browser may not support."
+        : "The available playback sources could not be loaded. Try again or report the issue.",
+    );
+  }, [sourceIndex, streams]);
+
+  useEffect(() => {
+    setNextEpisodeCountdown(null);
+  }, [activeEpisode, activeSeason]);
+
+  useEffect(() => {
+    if (nextEpisodeCountdown === null) return;
+    if (nextEpisodeCountdown <= 0) {
+      goToNextEpisode();
+      return;
+    }
+    const timer = window.setTimeout(
+      () => setNextEpisodeCountdown((current) => (current === null ? null : current - 1)),
+      1_000,
+    );
+    return () => window.clearTimeout(timer);
+  }, [goToNextEpisode, nextEpisodeCountdown]);
 
   return (
     <div className="min-h-screen bg-[oklch(0.08_0.004_250)] text-foreground">
@@ -505,17 +568,29 @@ function WatchPage() {
                     episode={activeEpisode}
                     onEnded={handleEnded}
                     markers={markerQuery.data}
+                    autoplayVideo={playbackPreferences.autoplayVideo}
+                    playbackRate={playbackPreferences.playbackRate}
+                    onPlaybackFailure={handlePlaybackFailure}
+                    onPlaybackRateChange={(playbackRate) =>
+                      updatePlaybackPreferences({ playbackRate })
+                    }
                   />
                 )}
+                {nextEpisodeCountdown !== null && nextTarget ? (
+                  <NextEpisodePrompt
+                    label={nextTargetLabel}
+                    countdown={nextEpisodeCountdown}
+                    onCancel={() => setNextEpisodeCountdown(null)}
+                    onPlay={goToNextEpisode}
+                  />
+                ) : null}
               </div>
             </div>
 
             <div className="mt-3 grid gap-3 md:grid-cols-[minmax(0,1fr)_auto] md:items-start">
               <div className="min-w-0">
                 <div className="text-[10px] text-muted-foreground">
-                  {mediaType === "movie"
-                    ? "Feature film"
-                    : `Season ${activeSeason}, Episode ${activeEpisode}`}
+                  {mediaType === "movie" ? "Feature film" : "TV Series"}
                 </div>
                 <h1 className="mt-0.5 text-[22px] font-semibold tracking-tight text-foreground sm:text-[28px]">
                   {title}
@@ -550,7 +625,7 @@ function WatchPage() {
             <div className="brushed poster-card overflow-hidden rounded-md">
               <div className="nav-aluminum flex items-center justify-between border-b border-[var(--aluminum-line)] px-3 py-2">
                 <div className="flex items-center gap-1.5">
-                  <LogoDot />
+                  <MediaGlyph className="h-5 w-5 text-primary/80" />
                   <span className="text-[12px] font-semibold text-foreground/90">Playback</span>
                 </div>
                 {streamQuery.data?.subjectId && (
@@ -585,6 +660,12 @@ function WatchPage() {
                 ) : (
                   <SummaryBlock detail={detail} />
                 )}
+                <PlaybackPreferencesPanel
+                  preferences={playbackPreferences}
+                  onChange={updatePlaybackPreferences}
+                  nextTarget={nextTarget}
+                  onPlayNext={goToNextEpisode}
+                />
               </div>
             </div>
           </aside>
@@ -620,7 +701,7 @@ function WatchTopBar({
             Details
           </Link>
           <div className="flex min-w-0 items-center gap-1.5">
-            <LogoDot />
+            <MediaGlyph className="h-5 w-5 shrink-0 text-primary/80" />
             <span className="line-clamp-1 text-[13px] font-semibold text-foreground/90">
               {title}
             </span>
@@ -643,7 +724,7 @@ function WatchTopBar({
           </Link>
           <Link
             to="/"
-            className="chip-pill chip-pill-interactive rounded-full px-2.5 py-0.5 text-[11px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[oklch(0.7_0.16_240/0.7)]"
+            className="chip-pill chip-pill-interactive hidden rounded-full px-2.5 py-0.5 text-[11px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[oklch(0.7_0.16_240/0.7)] sm:inline-flex"
           >
             Catalog
           </Link>
@@ -672,13 +753,160 @@ function PlayerPlaceholder({
       }}
     >
       <div className="flex max-w-md flex-col items-center gap-3 px-5">
-        <LogoDot className="h-9 w-9" />
+        <MediaPlaceholder label="" className="h-14 w-20 rounded-md border border-white/10" />
         <div>
           <div className="text-[14px] font-semibold text-foreground">{title}</div>
           <div className="mt-1 text-[12px] leading-relaxed text-foreground/70">{children}</div>
         </div>
       </div>
     </div>
+  );
+}
+
+function NextEpisodePrompt({
+  label,
+  countdown,
+  onCancel,
+  onPlay,
+}: {
+  label: string;
+  countdown: number;
+  onCancel: () => void;
+  onPlay: () => void;
+}) {
+  const cancelRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    cancelRef.current?.focus();
+  }, []);
+
+  return (
+    <div className="absolute inset-0 z-40 grid place-items-center bg-black/72 p-4 backdrop-blur-sm">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Up next: ${label}`}
+        className="panel-aluminum w-full max-w-sm rounded-md p-5 text-center"
+      >
+        <div className="text-[10px] font-medium uppercase tracking-[0.18em] text-primary">
+          Up next
+        </div>
+        <div className="mt-1 text-[16px] font-semibold text-foreground">{label}</div>
+        <p className="mt-2 text-[11px] text-muted-foreground">
+          Playing automatically in {countdown} second{countdown === 1 ? "" : "s"}.
+        </p>
+        <div className="mt-4 flex justify-center gap-2">
+          <button
+            ref={cancelRef}
+            type="button"
+            onClick={onCancel}
+            className="chip-pill chip-pill-interactive rounded-full px-4 py-1.5 text-[11px]"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onPlay}
+            className="btn-aqua btn-aqua-interactive rounded-full px-4 py-1.5 text-[11px]"
+          >
+            Play now
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PlaybackPreferencesPanel({
+  preferences,
+  onChange,
+  nextTarget,
+  onPlayNext,
+}: {
+  preferences: PlaybackPreferences;
+  onChange: (patch: Partial<PlaybackPreferences>) => void;
+  nextTarget: { season: number; episode: number } | null;
+  onPlayNext: () => void;
+}) {
+  return (
+    <section className="rounded-md border border-[var(--aluminum-line)] bg-black/15 p-3">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-foreground/80">
+          Preferences
+        </h2>
+        <button
+          type="button"
+          onClick={() => onChange(DEFAULT_PLAYBACK_PREFERENCES)}
+          className="text-[9px] text-muted-foreground hover:text-foreground"
+        >
+          Reset
+        </button>
+      </div>
+      <div className="grid gap-2">
+        <PreferenceToggle
+          label="Autoplay video"
+          description="Start a resolved source automatically."
+          active={preferences.autoplayVideo}
+          onClick={() => onChange({ autoplayVideo: !preferences.autoplayVideo })}
+        />
+        <PreferenceToggle
+          label="Autoplay next"
+          description="Continue TV episodes after a cancelable countdown."
+          active={preferences.autoplayNext}
+          onClick={() => onChange({ autoplayNext: !preferences.autoplayNext })}
+        />
+
+        {nextTarget ? (
+          <button
+            type="button"
+            onClick={onPlayNext}
+            className="btn-aqua btn-aqua-interactive rounded-full px-3 py-1.5 text-[10px] font-medium"
+          >
+            Play next: S{nextTarget.season} E{nextTarget.episode}
+          </button>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function PreferenceToggle({
+  label,
+  description,
+  active,
+  onClick,
+}: {
+  label: string;
+  description: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={onClick}
+      className="flex items-center justify-between gap-3 rounded-md border border-[var(--aluminum-line)] bg-black/15 px-3 py-2 text-left transition-colors hover:bg-white/5 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+    >
+      <span>
+        <span className="block text-[10px] font-medium text-foreground/90">{label}</span>
+        <span className="mt-0.5 block text-[9px] leading-relaxed text-muted-foreground">
+          {description}
+        </span>
+      </span>
+      <span
+        aria-hidden="true"
+        className={`relative h-5 w-9 shrink-0 rounded-full border transition-colors ${
+          active ? "border-primary/70 bg-primary/70" : "border-[var(--aluminum-line)] bg-black/30"
+        }`}
+      >
+        <span
+          className={`absolute top-0.5 h-3.5 w-3.5 rounded-full bg-white shadow transition-transform ${
+            active ? "translate-x-[17px]" : "translate-x-0.5"
+          }`}
+        />
+      </span>
+    </button>
   );
 }
 
@@ -742,8 +970,8 @@ function MovieDownloadMenu({
             Select Quality
           </div>
           <ul className="max-h-64 overflow-auto py-1 overscroll-contain">
-            {options.map((opt, i) => (
-              <li key={i}>
+            {options.map((opt) => (
+              <li key={`${opt.url}:${opt.quality}:${opt.audioLabel}`}>
                 <a
                   href={opt.url}
                   download={downloadFileName(title, opt.quality, season, episode)}
@@ -964,6 +1192,10 @@ function VideoPlayer({
   episode,
   onEnded,
   markers,
+  autoplayVideo,
+  playbackRate,
+  onPlaybackFailure,
+  onPlaybackRateChange,
 }: {
   sourceUrl: string;
   sourceType: string;
@@ -980,11 +1212,16 @@ function VideoPlayer({
   episode?: number;
   onEnded?: () => void;
   markers?: SkipMarker[];
+  autoplayVideo: boolean;
+  playbackRate: number;
+  onPlaybackFailure: () => void;
+  onPlaybackRateChange: (playbackRate: number) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<HlsInstance | null>(null);
   const startedRef = useRef(false);
+  const autoplayVideoRef = useRef(autoplayVideo);
   const [hlsSubtitles, setHlsSubtitles] = useState<PlayerTrackOption[]>([]);
   const [externalTracks, setExternalTracks] = useState<ResolvedCaptionTrack[]>([]);
   const [paused, setPaused] = useState(true);
@@ -1001,12 +1238,20 @@ function VideoPlayer({
   }, [onEnded]);
 
   useEffect(() => {
+    autoplayVideoRef.current = autoplayVideo;
+  }, [autoplayVideo]);
+
+  useEffect(() => {
     const video = videoRef.current as HTMLVideoElement;
     if (!video) return;
     let hls: HlsInstance | null = null;
     let cancelled = false;
     let lastSavedAt = 0;
     let progressRestored = false;
+
+    // Sync initial state with DOM in case browser auto-muted for autoplay
+    setVolume(video.volume);
+    setMuted(video.muted);
 
     const persist = () => saveProgress(progressKey, video);
     const maybeRestore = () => {
@@ -1041,8 +1286,10 @@ function VideoPlayer({
     const onLoadedMetadata = () => {
       maybeRestore();
     };
-    const onError = () =>
+    const onError = () => {
       recordClientEvent("playback_error", { mediaType, tmdbId, season, episode });
+      onPlaybackFailure();
+    };
 
     video.addEventListener("play", onPlay);
     video.addEventListener("pause", onPause);
@@ -1082,40 +1329,50 @@ function VideoPlayer({
     }
 
     async function attachSource() {
-      if (
-        sourceType === "application/x-mpegURL" &&
-        !video.canPlayType("application/vnd.apple.mpegurl")
-      ) {
+      if (sourceType === "application/x-mpegURL") {
         const { default: Hls } = await import("hls.js");
         const BundledHls = Hls as unknown as {
           new (config?: Record<string, unknown>): HlsInstance;
           isSupported: () => boolean;
           Events?: Record<string, string>;
         };
-        if (cancelled || !BundledHls.isSupported()) return;
-        hls = new BundledHls({ enableWorker: true });
-        hlsRef.current = hls;
-        const events = BundledHls.Events ?? {};
-        const trackedEvents = [
-          events.MANIFEST_PARSED,
-          events.LEVELS_UPDATED,
-          events.AUDIO_TRACKS_UPDATED,
-          events.SUBTITLE_TRACKS_UPDATED,
-        ].filter(Boolean);
-        trackedEvents.forEach((eventName) => hls?.on?.(eventName, syncHlsTracks));
-        hls.loadSource(sourceUrl);
-        hls.attachMedia(video);
-        setTimeout(syncHlsTracks, 0);
+
+        if (!cancelled && BundledHls.isSupported()) {
+          hls = new BundledHls({ enableWorker: true });
+          hlsRef.current = hls;
+          const events = BundledHls.Events ?? {};
+          const trackedEvents = [
+            events.MANIFEST_PARSED,
+            events.LEVELS_UPDATED,
+            events.AUDIO_TRACKS_UPDATED,
+            events.SUBTITLE_TRACKS_UPDATED,
+          ].filter(Boolean);
+          trackedEvents.forEach((eventName) => hls?.on?.(eventName, syncHlsTracks));
+          if (events.ERROR) {
+            hls.on?.(events.ERROR, (_event, data) => {
+              const errorData =
+                data && typeof data === "object" ? (data as Record<string, unknown>) : {};
+              if (errorData.fatal) onError();
+            });
+          }
+          hls.loadSource(sourceUrl);
+          hls.attachMedia(video);
+          setTimeout(syncHlsTracks, 0);
+        } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+          video.src = sourceUrl;
+          video.load();
+        }
       } else {
         video.src = sourceUrl;
         video.load();
       }
-      video.play().catch(() => {});
+      if (autoplayVideoRef.current) video.play().catch(() => {});
     }
 
     attachSource().catch(() => {
       video.src = sourceUrl;
       video.load();
+      if (autoplayVideoRef.current) video.play().catch(() => {});
     });
 
     return () => {
@@ -1137,12 +1394,27 @@ function VideoPlayer({
       video.removeEventListener("error", onError);
       window.removeEventListener("pagehide", persist);
     };
-  }, [episode, mediaType, onHlsTracksChange, progressKey, season, sourceType, sourceUrl, tmdbId]);
+  }, [
+    episode,
+    mediaType,
+    onHlsTracksChange,
+    onPlaybackFailure,
+    progressKey,
+    season,
+    sourceType,
+    sourceUrl,
+    tmdbId,
+  ]);
 
   useEffect(() => {
     setHlsSubtitles([]);
     onHlsTracksChange({ levels: [], audioTracks: [], subtitles: [] });
   }, [onHlsTracksChange, progressKey, sourceUrl]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (video) video.playbackRate = playbackRate;
+  }, [playbackRate]);
 
   useEffect(() => {
     let alive = true;
@@ -1250,8 +1522,14 @@ function VideoPlayer({
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      const activeTag = document.activeElement?.tagName.toLowerCase();
-      if (activeTag === "input" || activeTag === "textarea") return;
+      const activeElement = document.activeElement;
+      if (
+        activeElement instanceof HTMLElement &&
+        (activeElement.isContentEditable ||
+          ["INPUT", "TEXTAREA", "SELECT", "BUTTON", "A"].includes(activeElement.tagName))
+      ) {
+        return;
+      }
 
       const video = videoRef.current;
       const container = containerRef.current;
@@ -1268,11 +1546,12 @@ function VideoPlayer({
           e.preventDefault();
           video.currentTime = Math.max(0, video.currentTime - 10);
           break;
-        case "arrowright":
+        case "arrowright": {
           e.preventDefault();
           const d = Number.isFinite(video.duration) ? video.duration : 0;
           video.currentTime = Math.min(d, video.currentTime + 10);
           break;
+        }
         case "m":
           e.preventDefault();
           video.muted = !video.muted;
@@ -1291,8 +1570,13 @@ function VideoPlayer({
   const togglePlayback = () => {
     const video = videoRef.current;
     if (!video) return;
-    if (video.paused) void video.play();
-    else video.pause();
+    if (video.paused) {
+      if (video.muted) video.muted = false;
+      if (video.volume === 0) video.volume = 1;
+      void video.play();
+    } else {
+      video.pause();
+    }
   };
 
   const toggleFullscreen = () => {
@@ -1314,7 +1598,7 @@ function VideoPlayer({
         className="h-full w-full bg-black"
         onClick={togglePlayback}
         playsInline
-        autoPlay
+        autoPlay={autoplayVideo}
         poster={posterUrl}
         preload="metadata"
       >
@@ -1352,7 +1636,7 @@ function VideoPlayer({
                 videoRef.current.currentTime = marker.end;
               }
             }}
-            className="absolute bottom-16 right-4 z-30 rounded-full border border-white/20 bg-black/60 px-4 py-2 text-[12px] font-semibold text-white backdrop-blur-md transition-all hover:bg-black/80 hover:scale-105"
+            className="absolute bottom-16 right-4 z-30 rounded-full border border-white/20 bg-black/60 px-4 py-2 text-[12px] font-semibold text-white backdrop-blur-md transition-[transform,background-color] hover:bg-black/80 hover:scale-105"
           >
             Skip {marker.type === "intro" ? "Intro" : "Credits"}
           </button>
@@ -1386,7 +1670,12 @@ function VideoPlayer({
           type="button"
           onClick={() => {
             const video = videoRef.current;
-            if (video) video.muted = !video.muted;
+            if (video) {
+              video.muted = !video.muted;
+              if (!video.muted && video.volume === 0) {
+                video.volume = 1;
+              }
+            }
           }}
           aria-label={muted ? "Unmute" : "Mute"}
         >
@@ -1407,6 +1696,18 @@ function VideoPlayer({
           }}
           className="player-range hidden w-16 sm:block"
         />
+        <select
+          aria-label="Playback speed"
+          value={String(playbackRate)}
+          onChange={(event) => onPlaybackRateChange(Number(event.target.value))}
+          className="rounded border border-white/15 bg-black/30 px-1 py-0.5 text-[10px] text-white outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+        >
+          {[0.5, 0.75, 1, 1.25, 1.5, 2].map((rate) => (
+            <option key={rate} value={rate}>
+              {rate}x
+            </option>
+          ))}
+        </select>
         <button
           type="button"
           onClick={toggleFullscreen}
@@ -1472,7 +1773,7 @@ function EpisodeNavigator({
   const [downloadMode, setDownloadMode] = useState(false);
   const [expandedEpisode, setExpandedEpisode] = useState<{
     episode: number;
-    options: any[];
+    options: EpisodeDownloadOption[];
     loading: boolean;
   } | null>(null);
 
@@ -1501,9 +1802,7 @@ function EpisodeNavigator({
   };
 
   const seasonRailRef = useRef<HTMLDivElement>(null);
-  const activeSeasonName =
-    seasons.find((season) => season.season_number === activeSeason)?.name ??
-    `Season ${activeSeason}`;
+
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const virtualizer = useVirtualizer({
@@ -1515,30 +1814,13 @@ function EpisodeNavigator({
   const scrollSeasonRail = (dir: -1 | 1) =>
     seasonRailRef.current?.scrollBy({ left: dir * 240, behavior: "smooth" });
 
-  useEffect(() => {
-    // Keep useEffect for activeSeason if needed, but since downloadError is removed, we can just remove it entirely.
-  }, [activeSeason]);
-
   return (
     <div className={withDivider ? "border-t border-[var(--aluminum-line)] pt-3" : ""}>
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
         <div>
           <h2 className="text-[12px] font-semibold text-foreground/90">Episodes</h2>
-          <span aria-live="polite" className="text-[10px] text-primary">
-            {activeSeasonName}
-          </span>
         </div>
-        {episodes.length > 0 && (
-          <button
-            type="button"
-            onClick={() => setDownloadMode((v) => !v)}
-            className={`chip-pill chip-pill-interactive rounded-full px-2 py-0.5 text-[9px] font-medium uppercase tracking-wider ${
-              downloadMode ? "bg-primary text-primary-foreground shadow-none" : ""
-            }`}
-          >
-            {downloadMode ? "Done" : "Download"}
-          </button>
-        )}
+
       </div>
 
       <div className="mb-3 grid grid-cols-[minmax(0,1fr)] items-center gap-1.5 md:grid-cols-[auto_minmax(0,1fr)_auto]">

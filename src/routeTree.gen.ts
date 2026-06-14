@@ -10,11 +10,13 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as SupportRouteImport } from './routes/support'
+import { Route as SportsRouteImport } from './routes/sports'
 import { Route as SitemapDotxmlRouteImport } from './routes/sitemap[.]xml'
 import { Route as RobotsDottxtRouteImport } from './routes/robots[.]txt'
 import { Route as LegalRouteImport } from './routes/legal'
 import { Route as AdminRouteImport } from './routes/admin'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ApiSportsStreamRouteImport } from './routes/api.sports-stream'
 import { Route as WatchTypeIdRouteImport } from './routes/watch.$type.$id'
 import { Route as TmdbImgSizeFileRouteImport } from './routes/tmdb-img.$size.$file'
 import { Route as TitleTypeIdRouteImport } from './routes/title.$type.$id'
@@ -23,6 +25,11 @@ import { Route as DownloadTvIdRouteImport } from './routes/download.tv.$id'
 const SupportRoute = SupportRouteImport.update({
   id: '/support',
   path: '/support',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SportsRoute = SportsRouteImport.update({
+  id: '/sports',
+  path: '/sports',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SitemapDotxmlRoute = SitemapDotxmlRouteImport.update({
@@ -48,6 +55,11 @@ const AdminRoute = AdminRouteImport.update({
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiSportsStreamRoute = ApiSportsStreamRouteImport.update({
+  id: '/api/sports-stream',
+  path: '/api/sports-stream',
   getParentRoute: () => rootRouteImport,
 } as any)
 const WatchTypeIdRoute = WatchTypeIdRouteImport.update({
@@ -77,7 +89,9 @@ export interface FileRoutesByFullPath {
   '/legal': typeof LegalRoute
   '/robots.txt': typeof RobotsDottxtRoute
   '/sitemap.xml': typeof SitemapDotxmlRoute
+  '/sports': typeof SportsRoute
   '/support': typeof SupportRoute
+  '/api/sports-stream': typeof ApiSportsStreamRoute
   '/download/tv/$id': typeof DownloadTvIdRoute
   '/title/$type/$id': typeof TitleTypeIdRoute
   '/tmdb-img/$size/$file': typeof TmdbImgSizeFileRoute
@@ -89,7 +103,9 @@ export interface FileRoutesByTo {
   '/legal': typeof LegalRoute
   '/robots.txt': typeof RobotsDottxtRoute
   '/sitemap.xml': typeof SitemapDotxmlRoute
+  '/sports': typeof SportsRoute
   '/support': typeof SupportRoute
+  '/api/sports-stream': typeof ApiSportsStreamRoute
   '/download/tv/$id': typeof DownloadTvIdRoute
   '/title/$type/$id': typeof TitleTypeIdRoute
   '/tmdb-img/$size/$file': typeof TmdbImgSizeFileRoute
@@ -102,7 +118,9 @@ export interface FileRoutesById {
   '/legal': typeof LegalRoute
   '/robots.txt': typeof RobotsDottxtRoute
   '/sitemap.xml': typeof SitemapDotxmlRoute
+  '/sports': typeof SportsRoute
   '/support': typeof SupportRoute
+  '/api/sports-stream': typeof ApiSportsStreamRoute
   '/download/tv/$id': typeof DownloadTvIdRoute
   '/title/$type/$id': typeof TitleTypeIdRoute
   '/tmdb-img/$size/$file': typeof TmdbImgSizeFileRoute
@@ -116,7 +134,9 @@ export interface FileRouteTypes {
     | '/legal'
     | '/robots.txt'
     | '/sitemap.xml'
+    | '/sports'
     | '/support'
+    | '/api/sports-stream'
     | '/download/tv/$id'
     | '/title/$type/$id'
     | '/tmdb-img/$size/$file'
@@ -128,7 +148,9 @@ export interface FileRouteTypes {
     | '/legal'
     | '/robots.txt'
     | '/sitemap.xml'
+    | '/sports'
     | '/support'
+    | '/api/sports-stream'
     | '/download/tv/$id'
     | '/title/$type/$id'
     | '/tmdb-img/$size/$file'
@@ -140,7 +162,9 @@ export interface FileRouteTypes {
     | '/legal'
     | '/robots.txt'
     | '/sitemap.xml'
+    | '/sports'
     | '/support'
+    | '/api/sports-stream'
     | '/download/tv/$id'
     | '/title/$type/$id'
     | '/tmdb-img/$size/$file'
@@ -153,7 +177,9 @@ export interface RootRouteChildren {
   LegalRoute: typeof LegalRoute
   RobotsDottxtRoute: typeof RobotsDottxtRoute
   SitemapDotxmlRoute: typeof SitemapDotxmlRoute
+  SportsRoute: typeof SportsRoute
   SupportRoute: typeof SupportRoute
+  ApiSportsStreamRoute: typeof ApiSportsStreamRoute
   DownloadTvIdRoute: typeof DownloadTvIdRoute
   TitleTypeIdRoute: typeof TitleTypeIdRoute
   TmdbImgSizeFileRoute: typeof TmdbImgSizeFileRoute
@@ -167,6 +193,13 @@ declare module '@tanstack/react-router' {
       path: '/support'
       fullPath: '/support'
       preLoaderRoute: typeof SupportRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/sports': {
+      id: '/sports'
+      path: '/sports'
+      fullPath: '/sports'
+      preLoaderRoute: typeof SportsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/sitemap.xml': {
@@ -202,6 +235,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/sports-stream': {
+      id: '/api/sports-stream'
+      path: '/api/sports-stream'
+      fullPath: '/api/sports-stream'
+      preLoaderRoute: typeof ApiSportsStreamRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/watch/$type/$id': {
@@ -241,7 +281,9 @@ const rootRouteChildren: RootRouteChildren = {
   LegalRoute: LegalRoute,
   RobotsDottxtRoute: RobotsDottxtRoute,
   SitemapDotxmlRoute: SitemapDotxmlRoute,
+  SportsRoute: SportsRoute,
   SupportRoute: SupportRoute,
+  ApiSportsStreamRoute: ApiSportsStreamRoute,
   DownloadTvIdRoute: DownloadTvIdRoute,
   TitleTypeIdRoute: TitleTypeIdRoute,
   TmdbImgSizeFileRoute: TmdbImgSizeFileRoute,

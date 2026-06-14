@@ -28,13 +28,15 @@ export async function applyAppPrivileges(sql, databaseName) {
       `GRANT SELECT, INSERT ON
         media_title_genres,
         catalog_sync_events,
-        analytics_events
+        analytics_events,
+        admin_audit_events
        TO ${APP_ROLE}`,
     ),
     sql.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON job_leases TO ${APP_ROLE}`),
     sql.query(`GRANT SELECT ON schema_migrations TO ${APP_ROLE}`),
     sql.query(`GRANT USAGE, SELECT ON SEQUENCE catalog_sync_events_id_seq TO ${APP_ROLE}`),
     sql.query(`GRANT USAGE, SELECT ON SEQUENCE analytics_events_id_seq TO ${APP_ROLE}`),
+    sql.query(`GRANT USAGE, SELECT ON SEQUENCE admin_audit_events_id_seq TO ${APP_ROLE}`),
   ];
   await sql.transaction(queries);
 }

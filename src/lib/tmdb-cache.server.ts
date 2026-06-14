@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { neon } from "@neondatabase/serverless";
 import { envValue, localCacheDirectory } from "./env.server";
 import { log, serializeError } from "./logger.server";
+import { readBoundedBytes, readBoundedText } from "./upstream-response.server";
 
 const compress = promisify(brotliCompress);
 const decompress = promisify(brotliDecompress);
@@ -15,7 +16,8 @@ const DEFAULT_TMDB_IMG_BASE = "https://image.tmdb.org/t/p";
 const CACHE_VERSION = 1;
 const MAX_JSON_BYTES = 8_000_000;
 const MAX_IMAGE_BYTES = 14_000_000;
-const REQUEST_TIMEOUT_MS = 8_000;
+const MAX_MEMORY_ENTRIES = 300;
+const REQUEST_TIMEOUT_MS = 15_000;
 const RETRY_DELAYS_MS = [0, 200, 600];
 const localCacheRoot = localCacheDirectory();
 const cacheRoot = localCacheRoot ? join(localCacheRoot, "tmdb-v1") : undefined;
@@ -36,6 +38,16 @@ type CacheRecord<T> = {
 
 const memory = new Map<string, CacheRecord<unknown>>();
 let payloadSql: ReturnType<typeof neon> | undefined;
+
+function remember<T>(key: string, record: CacheRecord<T>) {
+  memory.delete(key);
+  memory.set(key, record as CacheRecord<unknown>);
+  while (memory.size > MAX_MEMORY_ENTRIES) {
+    const oldest = memory.keys().next().value;
+    if (!oldest) break;
+    memory.delete(oldest);
+  }
+}
 
 function configuredBaseUrl(key: string, fallback: string) {
   const configured = envValue(key)?.trim();
@@ -97,14 +109,17 @@ function cachePath(key: string) {
 
 async function readCached<T>(key: string): Promise<CacheRecord<T> | null> {
   const hit = memory.get(key) as CacheRecord<T> | undefined;
-  if (hit) return hit;
+  if (hit) {
+    remember(key, hit);
+    return hit;
+  }
   if (cacheRoot) {
     try {
       const file = await readFile(cachePath(key));
       const raw = await decompress(file);
       const parsed = JSON.parse(raw.toString("utf8")) as CacheRecord<T>;
       if (parsed.version !== CACHE_VERSION) return null;
-      memory.set(key, parsed as CacheRecord<unknown>);
+      remember(key, parsed);
       return parsed;
     } catch {
       // Filesystem cache miss.
@@ -150,7 +165,7 @@ async function readPersistent<T>(key: string, path: string): Promise<CacheRecord
       storedAt: new Date(row.stored_at).getTime(),
       expiresAt: new Date(row.expires_at).getTime(),
     };
-    memory.set(key, record as CacheRecord<unknown>);
+    remember(key, record);
     return record;
   } catch (error) {
     log("warn", "tmdb_payload_cache_read_failed", { error: serializeError(error) });
@@ -207,7 +222,7 @@ async function writeFilesystem<T>(key: string, record: CacheRecord<T>) {
 }
 
 async function writeCached<T>(key: string, record: CacheRecord<T>) {
-  memory.set(key, record as CacheRecord<unknown>);
+  remember(key, record);
   await Promise.all([writeFilesystem(key, record), writePersistent(key, record)]);
 }
 
@@ -226,11 +241,8 @@ async function fetchTmdb<T>(path: string, params: CacheParams) {
   }
 
   const res = await fetchWithRetry(url.toString(), { headers });
-  const text = await res.text();
+  const text = await readBoundedText(res, MAX_JSON_BYTES);
   if (!res.ok) throw new Error(`TMDB ${res.status}: ${text.slice(0, 160)}`);
-  if (new TextEncoder().encode(text).byteLength > MAX_JSON_BYTES) {
-    throw new Error("TMDB response exceeded cache size limit.");
-  }
   return JSON.parse(text) as T;
 }
 
@@ -325,10 +337,7 @@ export async function serveCachedTmdbImage(request: Request) {
     return new Response("TMDB image not found.", { status: response.status });
   }
   const contentType = response.headers.get("content-type") || imageContentType(imagePath);
-  const bytes = Buffer.from(await response.arrayBuffer());
-  if (bytes.byteLength > MAX_IMAGE_BYTES) {
-    return new Response("TMDB image exceeded cache size limit.", { status: 413 });
-  }
+  const bytes = Buffer.from(await readBoundedBytes(response, MAX_IMAGE_BYTES));
 
   if (files) {
     try {

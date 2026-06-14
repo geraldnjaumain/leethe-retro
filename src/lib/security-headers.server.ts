@@ -12,12 +12,17 @@ const CONTENT_SECURITY_POLICY = [
   "object-src 'none'",
   "script-src 'self' 'unsafe-inline'",
   "style-src 'self' 'unsafe-inline'",
-  "upgrade-insecure-requests",
-].join("; ");
+];
+
+if (isProduction()) {
+  CONTENT_SECURITY_POLICY.push("upgrade-insecure-requests");
+}
+
+const CSP_STRING = CONTENT_SECURITY_POLICY.join("; ");
 
 export function applySecurityHeaders(response: Response, id: string) {
   const headers = new Headers(response.headers);
-  headers.set("content-security-policy", CONTENT_SECURITY_POLICY);
+  headers.set("content-security-policy", CSP_STRING);
   headers.set("permissions-policy", "camera=(), microphone=(), geolocation=(), payment=()");
   headers.set("referrer-policy", "strict-origin-when-cross-origin");
   headers.set("x-content-type-options", "nosniff");

@@ -2,10 +2,10 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useWindowVirtualizer } from "@tanstack/react-virtual";
-import { LogoDot, Nav } from "@/components/leethe/Nav";
+import { Nav } from "@/components/leethe/Nav";
+import { MetallicWordmark } from "@/components/leethe/VisualAssets";
 import { GenreRail } from "@/components/leethe/GenreRail";
 import { PosterCard, PosterSkeleton } from "@/components/leethe/PosterCard";
-import { ReelCompanion } from "@/components/leethe/ReelCompanion";
 import { useTypeAndGenre } from "@/hooks/use-type-and-genre";
 import {
   discover,
@@ -58,9 +58,6 @@ function Index() {
 }
 
 const UNIFORM_ASPECT = "aspect-[2/3]";
-const UNIFORM_GRID =
-  "grid-cols-2 min-[560px]:grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6";
-const CHUNK = 6;
 
 function InfiniteFeed({
   type,
@@ -103,6 +100,7 @@ function InfiniteFeed({
   });
 
   const items = useMemo(() => query.data?.pages.flatMap((p) => p.results) ?? [], [query.data]);
+  const { fetchNextPage, hasNextPage, isFetchingNextPage } = query;
 
   const sentinel = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -110,15 +108,15 @@ function InfiniteFeed({
     const el = sentinel.current;
     const io = new IntersectionObserver(
       (entries) => {
-        if (entries[0].isIntersecting && query.hasNextPage && !query.isFetchingNextPage) {
-          query.fetchNextPage();
+        if (entries[0].isIntersecting && hasNextPage && !isFetchingNextPage) {
+          void fetchNextPage();
         }
       },
       { rootMargin: "600px 0px" },
     );
     io.observe(el);
     return () => io.disconnect();
-  }, [query]);
+  }, [fetchNextPage, hasNextPage, isFetchingNextPage]);
 
   const [cols, setCols] = useState(6);
   useEffect(() => {
@@ -143,10 +141,9 @@ function InfiniteFeed({
     return result;
   }, [items, cols]);
 
-  const listRef = useRef<HTMLDivElement>(null);
   const virtualizer = useWindowVirtualizer({
     count: query.isLoading ? 3 : rows.length + (query.isFetchingNextPage ? 1 : 0),
-    estimateSize: () => 350,
+    estimateSize: () => (cols <= 2 ? 250 : cols === 3 ? 300 : 350),
     overscan: 2,
   });
 
@@ -161,7 +158,7 @@ function InfiniteFeed({
       {query.error ? (
         <ErrorState error={query.error} onRetry={() => query.refetch()} />
       ) : (
-        <div ref={listRef}>
+        <div>
           <div
             style={{
               height: `${virtualizer.getTotalSize()}px`,
@@ -199,7 +196,7 @@ function InfiniteFeed({
                       ))
                     : rowItems.map((it, i) => (
                         <PosterCard
-                          key={`${it.id}-${i}`}
+                          key={it.id}
                           item={it}
                           type={type}
                           delay={((virtualRow.index * cols + i) % 12) * 40}
@@ -227,7 +224,6 @@ function InfiniteFeed({
         </div>
       )}
 
-      <ReelCompanion items={items} type={type} />
       <Footer />
     </section>
   );
@@ -260,12 +256,7 @@ function Footer() {
   return (
     <footer className="nav-aluminum brushed mt-8 overflow-hidden rounded-md border border-[var(--aluminum-line)]">
       <div className="flex flex-col items-center gap-2 px-4 py-3 sm:flex-row sm:justify-between">
-        <div className="flex items-center gap-1.5">
-          <LogoDot />
-          <span className="text-[11px] font-semibold tracking-tight text-foreground/85">
-            leethe
-          </span>
-        </div>
+        <MetallicWordmark className="text-[14px]" />
         <div className="text-[10px] text-muted-foreground">Curated movie and series discovery</div>
         <div className="text-[10px] text-muted-foreground">
           (c) {new Date().getFullYear()} Leethe. Data by TMDB.

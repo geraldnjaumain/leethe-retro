@@ -44,7 +44,9 @@ async function consumeSharedRateLimit(
   windowMs: number,
 ) {
   const databaseUrl = envValue("DATABASE_URL");
-  if (!isProduction() || !databaseUrl) return consumeRateLimit(request, scope, limit, windowMs);
+  if (!isProduction() || !databaseUrl || !envFlag("TRUST_PROXY")) {
+    return consumeRateLimit(request, scope, limit, windowMs);
+  }
 
   sharedSql ??= neon(databaseUrl);
   const windowSeconds = Math.max(1, Math.floor(windowMs / 1000));

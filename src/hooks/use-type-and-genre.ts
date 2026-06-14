@@ -17,6 +17,18 @@ export function useTypeAndGenre() {
   const sort: DiscoverSort =
     search.sort === "new" ? "new" : search.sort === "rated" ? "rated" : "popular";
 
+  useEffect(() => {
+    if ((search.q ?? "") === q) return;
+    const timer = window.setTimeout(() => {
+      void navigate({
+        to: "/",
+        search: { type, genre, q: q || undefined, sort: sortParam(sort) } as never,
+        replace: true,
+      });
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [genre, navigate, q, search.q, sort, type]);
+
   return {
     type,
     genre,
@@ -26,26 +38,19 @@ export function useTypeAndGenre() {
     setType: (t: MediaType) =>
       navigate({
         to: "/",
-        search: { type: t, genre: undefined, q: search.q, sort: sortParam(sort) } as never,
+        search: { type: t, genre: undefined, q: q || undefined, sort: sortParam(sort) } as never,
       }),
     setGenre: (g: number | undefined) =>
       navigate({
         to: "/",
-        search: { type, genre: g, q: search.q, sort: sortParam(sort) } as never,
+        search: { type, genre: g, q: q || undefined, sort: sortParam(sort) } as never,
       }),
     setSort: (newSort: DiscoverSort) =>
       navigate({
         to: "/",
-        search: { type, genre, q: search.q, sort: sortParam(newSort) } as never,
+        search: { type, genre, q: q || undefined, sort: sortParam(newSort) } as never,
       }),
-    setQuery: (newQ: string) => {
-      setQ(newQ);
-      navigate({
-        to: "/",
-        search: { type, genre, q: newQ || undefined, sort: sortParam(sort) } as never,
-        replace: true,
-      });
-    },
+    setQuery: setQ,
   };
 }
 

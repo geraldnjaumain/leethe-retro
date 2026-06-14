@@ -1,12 +1,15 @@
 import { neon } from "@neondatabase/serverless";
 import { randomUUID } from "node:crypto";
+import { catalogShardAppUrls, groupRecordsByCatalogShard } from "./lib/catalog-shards.mjs";
 
 const databaseUrl = process.env.DATABASE_URL;
 const tmdbToken = process.env.TMDB_READ_ACCESS_TOKEN;
 if (!databaseUrl) throw new Error("Set the least-privileged DATABASE_URL before refreshing.");
 if (!tmdbToken) throw new Error("Set TMDB_READ_ACCESS_TOKEN before refreshing.");
 
-const sql = neon(databaseUrl);
+const controlSql = neon(databaseUrl);
+const shardUrls = catalogShardAppUrls();
+const shardSqls = shardUrls.map((url) => neon(url));
 const pageCount = Math.min(20, Math.max(1, Number(process.env.CATALOG_REFRESH_PAGES) || 5));
 const leaseOwner = randomUUID();
 const leaseName = "catalog-refresh";
@@ -74,7 +77,7 @@ async function tmdb(path, params = {}) {
 }
 
 async function acquireLease() {
-  const rows = await sql.query(
+  const rows = await controlSql.query(
     `INSERT INTO job_leases (name, lease_owner, expires_at, updated_at)
      VALUES ($1, $2, now() + make_interval(secs => $3), now())
      ON CONFLICT (name) DO UPDATE
@@ -89,7 +92,7 @@ async function acquireLease() {
 }
 
 async function renewLease() {
-  const rows = await sql.query(
+  const rows = await controlSql.query(
     `UPDATE job_leases
      SET expires_at = now() + make_interval(secs => $3),
          updated_at = now()
@@ -101,7 +104,7 @@ async function renewLease() {
 }
 
 async function releaseLease() {
-  await sql.query("DELETE FROM job_leases WHERE name = $1 AND lease_owner = $2", [
+  await controlSql.query("DELETE FROM job_leases WHERE name = $1 AND lease_owner = $2", [
     leaseName,
     leaseOwner,
   ]);
@@ -109,7 +112,7 @@ async function releaseLease() {
 
 async function recordFailure(type, source, page, error) {
   try {
-    await sql.query(
+    await controlSql.query(
       `INSERT INTO catalog_sync_events (media_type, source, query, page, item_count)
        VALUES ($1, $2, $3, $4, 0)`,
       [type, `failed:${source}`, errorMessage(error).slice(0, 500), page ?? null],
@@ -149,24 +152,26 @@ function titleRecord(type, item) {
 }
 
 async function upsertGenres(type, genres) {
-  await sql.query(
-    `WITH input AS (
-      SELECT * FROM jsonb_to_recordset($2::jsonb) AS x(tmdb_id integer, name text)
-    )
-    INSERT INTO genres (media_type, tmdb_id, name, synced_at)
-    SELECT $1, tmdb_id, name, now() FROM input
-    ON CONFLICT (media_type, tmdb_id) DO UPDATE SET name = EXCLUDED.name, synced_at = now()`,
-    [type, JSON.stringify(genres.map((genre) => ({ tmdb_id: genre.id, name: genre.name })))],
+  await Promise.all(
+    shardSqls.map((sql) =>
+      sql.query(
+        `WITH input AS (
+          SELECT * FROM jsonb_to_recordset($2::jsonb) AS x(tmdb_id integer, name text)
+        )
+        INSERT INTO genres (media_type, tmdb_id, name, synced_at)
+        SELECT $1, tmdb_id, name, now() FROM input
+        ON CONFLICT (media_type, tmdb_id) DO UPDATE SET name = EXCLUDED.name, synced_at = now()`,
+        [type, JSON.stringify(genres.map((genre) => ({ tmdb_id: genre.id, name: genre.name })))],
+      ),
+    ),
   );
 }
 
-async function upsertPage(type, sort, page, response) {
-  const records = response.results.map((item) => titleRecord(type, item));
+async function upsertTitleRecords(sql, type, records) {
   const relations = records.flatMap((item) =>
     item.genre_ids.map((genre) => ({ title_tmdb_id: item.tmdb_id, genre_tmdb_id: genre })),
   );
   const genreIds = [...new Set(relations.map((relation) => relation.genre_tmdb_id))];
-  const cacheKey = ["discover", type, sort, "all", "", ""].join(":");
   const queries = [
     sql.query(
       `INSERT INTO genres (media_type, tmdb_id, name, synced_at)
@@ -202,20 +207,6 @@ async function upsertPage(type, sort, page, response) {
         synced_at = now(), updated_at = now()`,
       [type, JSON.stringify(records)],
     ),
-    sql.query(
-      `INSERT INTO catalog_pages (
-        cache_key, page, media_type, mode, sort, total_pages, title_tmdb_ids, synced_at
-      ) VALUES ($1, $2, $3, 'discover', $4, $5, $6::integer[], now())
-      ON CONFLICT (cache_key, page) DO UPDATE SET
-        total_pages = EXCLUDED.total_pages, title_tmdb_ids = EXCLUDED.title_tmdb_ids,
-        synced_at = now()`,
-      [cacheKey, page, type, sort, response.total_pages, records.map((record) => record.tmdb_id)],
-    ),
-    sql.query(
-      `INSERT INTO catalog_sync_events (media_type, source, page, item_count)
-       VALUES ($1, $2, $3, $4)`,
-      [type, `scheduled:${sort}`, page, records.length],
-    ),
   ];
   if (relations.length) {
     queries.push(
@@ -232,6 +223,36 @@ async function upsertPage(type, sort, page, response) {
     );
   }
   await sql.transaction(queries);
+}
+
+async function upsertPage(type, sort, page, response) {
+  const records = response.results.map((item) => titleRecord(type, item));
+  const groups = groupRecordsByCatalogShard(records, shardSqls.length);
+  await Promise.all(
+    groups.map((recordsForShard, index) =>
+      recordsForShard.length
+        ? upsertTitleRecords(shardSqls[index], type, recordsForShard)
+        : Promise.resolve(),
+    ),
+  );
+
+  const cacheKey = ["discover", type, sort, "all", "", ""].join(":");
+  await controlSql.transaction([
+    controlSql.query(
+      `INSERT INTO catalog_pages (
+        cache_key, page, media_type, mode, sort, total_pages, title_tmdb_ids, synced_at
+      ) VALUES ($1, $2, $3, 'discover', $4, $5, $6::integer[], now())
+      ON CONFLICT (cache_key, page) DO UPDATE SET
+        total_pages = EXCLUDED.total_pages, title_tmdb_ids = EXCLUDED.title_tmdb_ids,
+        synced_at = now()`,
+      [cacheKey, page, type, sort, response.total_pages, records.map((record) => record.tmdb_id)],
+    ),
+    controlSql.query(
+      `INSERT INTO catalog_sync_events (media_type, source, page, item_count)
+       VALUES ($1, $2, $3, $4)`,
+      [type, `scheduled:${sort}`, page, records.length],
+    ),
+  ]);
   return records.length;
 }
 

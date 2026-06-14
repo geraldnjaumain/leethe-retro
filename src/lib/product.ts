@@ -112,11 +112,15 @@ export const trackProductEvent = createServerFn({ method: "POST" })
 function validateAdminInput(raw: unknown) {
   const value = record(raw);
   const password = cleanText(value.password, 300);
+  const ticketOffset = Math.max(
+    0,
+    Math.min(Number.parseInt(String(value.ticketOffset ?? "0"), 10) || 0, 100_000),
+  );
   if (!password) throw new Error("Admin password is required.");
-  return { password };
+  return { password, ticketOffset };
 }
 
-function validateTicketUpdateInput(raw: unknown) {
+export function validateTicketUpdateInput(raw: unknown) {
   const value = record(raw);
   const password = cleanText(value.password, 300);
   const id = cleanText(value.id, 40);
@@ -125,13 +129,31 @@ function validateTicketUpdateInput(raw: unknown) {
   return { password, id, status };
 }
 
+export function validateBulkTicketUpdateInput(raw: unknown) {
+  const value = record(raw);
+  const password = cleanText(value.password, 300);
+  const status = cleanText(value.status, 32) as TicketStatus;
+  const ids = [
+    ...new Set(
+      (Array.isArray(value.ids) ? value.ids : [])
+        .slice(0, 100)
+        .map((id) => cleanText(id, 40))
+        .filter((id) => /^TKT-[A-Z0-9]{1,32}$/.test(id)),
+    ),
+  ];
+  if (!password || !ids.length || !TICKET_STATUSES.has(status)) {
+    throw new Error("Invalid bulk ticket update.");
+  }
+  return { password, ids, status };
+}
+
 export const getAdminDashboard = createServerFn({ method: "POST" })
   .middleware([adminRateLimitMiddleware])
   .inputValidator(validateAdminInput)
   .handler(async ({ data }): Promise<AdminDashboard> => {
     const { assertAdminPassword, readAdminDashboard } = await import("./product-data.server");
     assertAdminPassword(data.password);
-    return readAdminDashboard();
+    return readAdminDashboard(data.ticketOffset);
   });
 
 export const updateSupportTicketStatus = createServerFn({ method: "POST" })
@@ -142,6 +164,15 @@ export const updateSupportTicketStatus = createServerFn({ method: "POST" })
     assertAdminPassword(data.password);
     await setSupportTicketStatus(data.id, data.status);
     return { updated: true };
+  });
+
+export const updateSupportTicketsStatus = createServerFn({ method: "POST" })
+  .middleware([adminRateLimitMiddleware])
+  .inputValidator(validateBulkTicketUpdateInput)
+  .handler(async ({ data }) => {
+    const { assertAdminPassword, setSupportTicketsStatus } = await import("./product-data.server");
+    assertAdminPassword(data.password);
+    return { updated: await setSupportTicketsStatus(data.ids, data.status) };
   });
 
 export type { AdminDashboard, ProductEventName, SupportCategory, TicketStatus };

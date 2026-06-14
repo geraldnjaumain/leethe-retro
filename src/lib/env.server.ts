@@ -38,6 +38,7 @@ const productionSchema = z.object({
   TMDB_READ_ACCESS_TOKEN: z.string().min(20),
   SITE_URL: z.string().url(),
   LEGAL_CONTACT_EMAIL: z.string().email(),
+  ADMIN_PASSWORD: z.string().min(16).max(256).optional(),
 });
 
 export function validateProductionEnv() {
@@ -47,6 +48,7 @@ export function validateProductionEnv() {
     TMDB_READ_ACCESS_TOKEN: envValue("TMDB_READ_ACCESS_TOKEN"),
     SITE_URL: envValue("SITE_URL"),
     LEGAL_CONTACT_EMAIL: envValue("LEGAL_CONTACT_EMAIL"),
+    ADMIN_PASSWORD: envValue("ADMIN_PASSWORD") || undefined,
   });
 
   if (envFlag("ENABLE_EXTERNAL_STREAM_RESOLVER") && !envFlag("STREAMING_RIGHTS_CONFIRMED")) {

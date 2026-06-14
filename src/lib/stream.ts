@@ -3,6 +3,8 @@ import type { DirectStreamResult } from "./moviebox.server";
 import { streamRateLimitMiddleware } from "./rate-limit";
 import type { MediaType } from "./tmdb";
 
+type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+
 export type ResolveWatchStreamsInput = {
   title: string;
   type: MediaType;
@@ -71,7 +73,8 @@ export const resolveWatchStreams = createServerFn({ method: "POST" })
       return {
         success: false,
         streams: [],
-        error: "External streaming is unavailable.",
+        error:
+          "Streaming is disabled until the operator enables the resolver and confirms distribution rights.",
       };
     }
     const { resolveStreams } = await import("./moviebox.server");
@@ -169,56 +172,106 @@ export const resolveStreamCaptions = createServerFn({ method: "POST" })
   .middleware([streamRateLimitMiddleware])
   .inputValidator((raw: unknown) => {
     const value = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+    const subjectId = typeof value.subjectId === "string" ? value.subjectId.trim() : "";
+    const resourceId = typeof value.resourceId === "string" ? value.resourceId.trim() : "";
+    if (!/^\d{1,24}$/.test(subjectId) || !resourceId || resourceId.length > 80) {
+      throw new Error("Invalid caption request.");
+    }
     return {
-      subjectId: String(value.subjectId || ""),
-      resourceId: String(value.resourceId || ""),
+      subjectId,
+      resourceId,
     };
   })
   .handler(async ({ data }) => {
+    const { getServerConfig } = await import("./config.server");
+    if (!getServerConfig().externalStreamResolverEnabled) return [];
     const { getAsyncCaptions } = await import("./moviebox.server");
-    return (await getAsyncCaptions(data.subjectId, data.resourceId)) as any[];
+    return JSON.parse(
+      JSON.stringify(await getAsyncCaptions(data.subjectId, data.resourceId)),
+    ) as JsonValue[];
   });
 
+function privateLiteralHostname(hostname: string) {
+  if (hostname.includes(":")) return true;
+  if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(hostname)) return false;
+  const [a, b] = hostname.split(".").map(Number);
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 198 && (b === 18 || b === 19)) ||
+    a >= 224
+  );
+}
+
+export function validateSubtitleUrl(raw: unknown) {
+  if (typeof raw !== "string" || raw.length > 2_048) throw new Error("Invalid subtitle URL.");
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error("Invalid subtitle URL.");
+  }
+  const hostname = url.hostname.toLowerCase();
+  const normalizedHostname = hostname.replace(/^\[|\]$/g, "");
+  if (
+    url.protocol !== "https:" ||
+    url.username ||
+    url.password ||
+    !hostname ||
+    hostname === "localhost" ||
+    hostname.endsWith(".localhost") ||
+    hostname.endsWith(".local") ||
+    hostname.endsWith(".internal") ||
+    privateLiteralHostname(normalizedHostname)
+  ) {
+    throw new Error("Invalid subtitle URL.");
+  }
+  url.hash = "";
+  return url.toString();
+}
+
 export const proxySubtitle = createServerFn({ method: "GET" })
-  .inputValidator((url: unknown) => {
-    if (typeof url !== "string" || !url.startsWith("http")) throw new Error("Invalid URL");
-    return url;
-  })
+  .middleware([streamRateLimitMiddleware])
+  .inputValidator(validateSubtitleUrl)
   .handler(async ({ data }) => {
     try {
-      const response = await fetch(data);
-      if (!response.ok) throw new Error("Failed to fetch");
-      return await response.text();
+      const { getServerConfig } = await import("./config.server");
+      if (!getServerConfig().externalStreamResolverEnabled) return "";
+      const { fetchSubtitleText } = await import("./subtitle-proxy.server");
+      return await fetchSubtitleText(data);
     } catch {
       return "";
     }
   });
+
+export function validateSkipSegmentsInput(raw: unknown) {
+  const value = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const tmdbId =
+    typeof value.tmdbId === "string" ? value.tmdbId.trim() : String(value.tmdbId ?? "");
+  if (!/^\d{1,12}$/.test(tmdbId)) throw new Error("Invalid title id.");
+  const mediaType: MediaType = value.mediaType === "tv" ? "tv" : "movie";
+  const season = positiveInt(value.season, 999);
+  const episode = positiveInt(value.episode, 10_000);
+  if (mediaType === "tv" && (!season || !episode)) throw new Error("Invalid episode.");
+  return { tmdbId, mediaType, season, episode };
+}
+
 export const resolveSkipSegments = createServerFn({ method: "POST" })
-  .inputValidator((raw: unknown) => {
-    const value = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
-    return {
-      tmdbId: String(value.tmdbId || ""),
-      mediaType: value.mediaType === "tv" ? "tv" : "movie",
-      season: typeof value.season === "number" ? value.season : undefined,
-      episode: typeof value.episode === "number" ? value.episode : undefined,
-    };
-  })
+  .middleware([streamRateLimitMiddleware])
+  .inputValidator(validateSkipSegmentsInput)
   .handler(async ({ data }) => {
     try {
       const { tmdbId, mediaType, season, episode } = data;
-      const { getMediaMappings } = await import("./moviebox.server");
-      const mapping = await getMediaMappings(mediaType, tmdbId);
-      let imdbId = mapping?.imdbId;
-
-      if (!imdbId) {
-        const tmdbReq = await fetch(
-          `https://api.themoviedb.org/3/${mediaType}/${tmdbId}/external_ids?api_key=4d5e2e8e932b12fa6b3064e4337ba7dd`,
-        );
-        if (tmdbReq.ok) {
-          const tmdbData = await tmdbReq.json();
-          imdbId = tmdbData.imdb_id;
-        }
-      }
+      const { tmdbCachedRequest } = await import("./tmdb-cache.server");
+      const tmdbData = await tmdbCachedRequest<{ imdb_id?: string }>(
+        `/${mediaType}/${tmdbId}/external_ids`,
+      );
+      const imdbId = tmdbData.imdb_id;
 
       if (!imdbId) return [];
 
@@ -232,23 +285,34 @@ export const resolveSkipSegments = createServerFn({ method: "POST" })
 
       const res = await fetch(url.toString(), {
         headers: { Accept: "application/json" },
-        signal: AbortSignal.timeout(5000),
+        signal: AbortSignal.timeout(15000),
       });
 
       if (!res.ok) return [];
-      const payload = await res.json();
-      const segments: any[] = Array.isArray(payload)
+      const { readBoundedText } = await import("./upstream-response.server");
+      const payload = JSON.parse(await readBoundedText(res, 1_000_000)) as unknown;
+      const record =
+        payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
+      const segments = Array.isArray(payload)
         ? payload
-        : payload.segments || payload.data || [];
+        : Array.isArray(record.segments)
+          ? record.segments
+          : Array.isArray(record.data)
+            ? record.data
+            : [];
       if (!Array.isArray(segments)) return [];
 
       return segments
-        .map((s) => ({
-          type:
-            (s.segment_type || s.type || "intro").toLowerCase() === "credits" ? "credits" : "intro",
-          start: Number(s.start_sec || s.start || 0),
-          end: Number(s.end_sec || s.end || 0),
-        }))
+        .map((segment) => {
+          const item =
+            segment && typeof segment === "object" ? (segment as Record<string, unknown>) : {};
+          const kind = String(item.segment_type || item.type || "intro").toLowerCase();
+          return {
+            type: kind === "credits" ? ("credits" as const) : ("intro" as const),
+            start: Number(item.start_sec || item.start || 0),
+            end: Number(item.end_sec || item.end || 0),
+          };
+        })
         .filter((s) => s.end > s.start);
     } catch {
       return [];

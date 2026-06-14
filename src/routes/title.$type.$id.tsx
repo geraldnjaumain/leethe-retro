@@ -1,6 +1,13 @@
 import { createFileRoute, Link, useParams } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
+import {
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type ButtonHTMLAttributes,
+  type ReactNode,
+} from "react";
 import {
   backdrop,
   fetchCollection,
@@ -16,7 +23,12 @@ import {
   type MediaType,
 } from "@/lib/tmdb";
 import { PosterCard, StarGlyph } from "@/components/leethe/PosterCard";
-import { LogoDot } from "@/components/leethe/Nav";
+import {
+  BrandMark,
+  MediaGlyph,
+  MediaPlaceholder,
+  PersonPlaceholder,
+} from "@/components/leethe/VisualAssets";
 
 export const Route = createFileRoute("/title/$type/$id")({
   head: () => ({ meta: [{ title: "Leethe - Title" }] }),
@@ -164,6 +176,7 @@ function TitlePage() {
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ["detail", mediaType, id],
     queryFn: () => fetchDetail(mediaType, id),
+    staleTime: 1000 * 60 * 10,
   });
   const [trailerOpen, setTrailerOpen] = useState(false);
   const castRailRef = useRef<HTMLDivElement>(null);
@@ -245,6 +258,7 @@ function TitlePage() {
                   <img
                     src={ps}
                     alt={t}
+                    decoding="async"
                     className="block h-[260px] w-[174px] rounded-[3px] object-cover sm:h-[330px] sm:w-[220px]"
                   />
                 </div>
@@ -407,20 +421,12 @@ function TitlePage() {
               return (
                 <div
                   key={c.id}
-                  className="group w-[92px] shrink-0 snap-start animate-fade-up text-center transition-transform duration-300 hover:-translate-y-[2px] sm:w-[112px]"
-                  style={{ animationDelay: `${i * 30}ms` }}
+                  className={`group w-[92px] shrink-0 snap-start ${i < 8 ? "animate-fade-up" : ""} text-center transition-transform duration-300 hover:-translate-y-[2px] sm:w-[112px]`}
+                  style={i < 8 ? { animationDelay: `${i * 30}ms` } : undefined}
                 >
                   <div className="poster-card mx-auto grid aspect-square w-full place-items-center overflow-hidden rounded-full bg-[oklch(0.16_0.008_250)] p-[3px]">
                     <div className="h-full w-full overflow-hidden rounded-full bg-[radial-gradient(circle_at_50%_32%,oklch(0.28_0.008_250),oklch(0.13_0.006_250))]">
-                      {img ? (
-                        <img
-                          src={img}
-                          alt={c.name}
-                          className="h-full w-full object-cover transition-transform duration-[500ms] ease-[cubic-bezier(0.2,0.8,0.2,1)] group-hover:scale-[1.06]"
-                        />
-                      ) : (
-                        <PersonPlaceholder name={c.name} />
-                      )}
+                      <CastPortrait src={img} name={c.name} />
                     </div>
                   </div>
                   <div className="mt-1.5 px-1">
@@ -492,7 +498,7 @@ function CollectionBanner({
               {collection.name}
             </h3>
             <div className="text-[11px] text-muted-foreground">
-              {parts.length + 1} titles in this collection
+              {data ? `${data.parts.length} titles in this collection` : "Loading collection..."}
             </div>
           </div>
           {parts.length > 0 && (
@@ -527,14 +533,18 @@ function CollectionBanner({
                       }`}
                     >
                       <div className="aspect-[2/3] bg-[oklch(0.16_0.008_250)] relative">
-                        {ps && (
+                        {ps ? (
                           <img
                             src={ps}
                             alt={label}
+                            loading="lazy"
+                            decoding="async"
                             className={`h-full w-full object-cover transition-transform duration-[500ms] ease-[cubic-bezier(0.2,0.8,0.2,1)] ${
                               !isCurrent && "group-hover/c:scale-[1.05]"
                             }`}
                           />
+                        ) : (
+                          <MediaPlaceholder label="Poster unavailable" />
                         )}
                         {isCurrent && (
                           <div className="absolute inset-0 bg-black/40 grid place-items-center backdrop-blur-[2px]">
@@ -601,24 +611,6 @@ function SimilarSection({ type, id }: { type: MediaType; id: string }) {
   );
 }
 
-function PersonPlaceholder({ name }: { name: string }) {
-  const initials = name
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0]?.toUpperCase())
-    .join("");
-
-  return (
-    <div className="grid h-full w-full place-items-center text-center">
-      <div className="flex flex-col items-center gap-1 text-muted-foreground">
-        <LogoDot className="h-6 w-6 opacity-75" />
-        <span className="text-[12px] font-semibold text-foreground/65">{initials || "?"}</span>
-      </div>
-    </div>
-  );
-}
-
 type SeasonData = {
   id: number;
   season_number: number;
@@ -629,14 +621,30 @@ type SeasonData = {
   overview: string;
 };
 
+function CastPortrait({ src, name }: { src: string | null; name: string }) {
+  const [failed, setFailed] = useState(false);
+
+  if (!src || failed) return <PersonPlaceholder />;
+
+  return (
+    <img
+      src={src}
+      alt={name}
+      loading="lazy"
+      decoding="async"
+      onError={() => setFailed(true)}
+      className="h-full w-full object-cover object-center transition-transform duration-[500ms] ease-[cubic-bezier(0.2,0.8,0.2,1)] group-hover:scale-[1.06]"
+    />
+  );
+}
+
 function SeasonsSection({ id, seasons }: { id: string; seasons: SeasonData[] }) {
   const [active, setActive] = useState<number>(seasons[0]?.season_number ?? 1);
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ["season", id, active],
     queryFn: () => fetchSeason(id, active),
   });
-  const activeSeasonName =
-    seasons.find((season) => season.season_number === active)?.name ?? `Season ${active}`;
+
 
   return (
     <section className="mx-auto max-w-[1200px] px-4 py-6 animate-fade-up">
@@ -669,9 +677,7 @@ function SeasonsSection({ id, seasons }: { id: string; seasons: SeasonData[] }) 
           </button>
         ))}
       </div>
-      <div aria-live="polite" className="mb-3 text-[11px] text-primary">
-        Showing {activeSeasonName}
-      </div>
+
 
       {/* Episode list */}
       {error ? (
@@ -697,8 +703,8 @@ function SeasonsSection({ id, seasons }: { id: string; seasons: SeasonData[] }) 
             return (
               <li
                 key={ep.id}
-                className="group flex gap-3 px-3 py-2.5 transition-colors duration-200 hover:bg-[oklch(0.24_0.008_250)] animate-fade-up"
-                style={{ animationDelay: `${i * 20}ms` }}
+                className={`group flex gap-3 px-3 py-2.5 transition-colors duration-200 hover:bg-[oklch(0.24_0.008_250)] ${i < 8 ? "animate-fade-up" : ""}`}
+                style={i < 8 ? { animationDelay: `${i * 20}ms` } : undefined}
               >
                 {/* Episode number badge */}
                 <div className="grid h-6 w-6 shrink-0 place-items-center self-start rounded-full border border-[oklch(0.08_0.005_250)] bg-gradient-to-b from-[oklch(0.32_0.008_250)] to-[oklch(0.2_0.008_250)] text-[10px] font-semibold text-foreground/85 shadow-[0_1px_0_oklch(1_0_0/0.1)_inset]">
@@ -711,6 +717,8 @@ function SeasonsSection({ id, seasons }: { id: string; seasons: SeasonData[] }) 
                     <img
                       src={img}
                       alt={ep.name}
+                      loading="lazy"
+                      decoding="async"
                       className="h-[68px] w-[120px] object-cover transition-transform duration-[500ms] ease-[cubic-bezier(0.2,0.8,0.2,1)] group-hover:scale-[1.04]"
                     />
                   </div>
@@ -742,7 +750,7 @@ function SeasonsSection({ id, seasons }: { id: string; seasons: SeasonData[] }) 
                     to="/watch/$type/$id"
                     params={{ type: "tv", id }}
                     search={{ s: active, e: ep.episode_number }}
-                    className="chip-pill chip-pill-interactive mt-2 inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[10px] font-medium opacity-90 transition-all duration-200 hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[oklch(0.7_0.16_240/0.7)] sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100"
+                    className="chip-pill chip-pill-interactive mt-2 inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[10px] font-medium opacity-90 transition-all duration-200 hover:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[oklch(0.7_0.16_240/0.7)]"
                   >
                     <PlayGlyph className="h-2.5 w-2.5" />
                     Watch
@@ -766,14 +774,45 @@ function TrailerModal({
   title: string;
   onClose: () => void;
 }) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    const previousFocus =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focusableSelector =
+      'button, [href], input, select, textarea, iframe, [tabindex]:not([tabindex="-1"])';
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onClose();
+        return;
+      }
+      if (event.key !== "Tab" || !dialogRef.current) return;
+      const focusable = Array.from(
+        dialogRef.current.querySelectorAll<HTMLElement>(focusableSelector),
+      ).filter((element) => !element.hasAttribute("disabled"));
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
     document.addEventListener("keydown", onKey);
     const prev = document.body.style.overflow;
     document.body.style.overflow = "hidden";
+    window.setTimeout(
+      () => dialogRef.current?.querySelector<HTMLElement>(focusableSelector)?.focus(),
+      0,
+    );
     return () => {
       document.removeEventListener("keydown", onKey);
       document.body.style.overflow = prev;
+      previousFocus?.focus();
     };
   }, [onClose]);
 
@@ -783,14 +822,21 @@ function TrailerModal({
       className="fixed inset-0 z-[100] grid place-items-center bg-black/80 px-4 py-6 backdrop-blur-md animate-fade-in"
     >
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
         onClick={(e) => e.stopPropagation()}
         className="brushed relative w-full max-w-[960px] overflow-hidden rounded-md border border-[var(--aluminum-line)] shadow-[0_30px_80px_-20px_oklch(0_0_0/0.9),0_0_0_1px_oklch(1_0_0/0.05)_inset] animate-scale-in"
       >
         {/* Modal title bar */}
         <div className="nav-aluminum flex items-center justify-between px-3 py-2 border-b border-[var(--aluminum-line)]">
           <div className="flex items-center gap-1.5">
-            <LogoDot />
-            <span className="text-[11px] font-semibold tracking-tight text-foreground/90 line-clamp-1">
+            <MediaGlyph className="h-5 w-5 text-primary/80" />
+            <span
+              id={titleId}
+              className="text-[11px] font-semibold tracking-tight text-foreground/90 line-clamp-1"
+            >
               {title} - Trailer
             </span>
           </div>
@@ -840,7 +886,7 @@ function TopBar() {
           Back
         </Link>
         <Link to="/" className="ml-1 flex items-center gap-1.5 group">
-          <LogoDot className="transition-transform duration-300 group-hover:scale-[1.06]" />
+          <BrandMark className="transition-transform duration-300 group-hover:scale-[1.06]" />
           <span className="text-[15px] font-semibold tracking-tight text-foreground/95">
             leethe
           </span>

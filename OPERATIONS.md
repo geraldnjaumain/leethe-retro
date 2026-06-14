@@ -14,6 +14,15 @@
 
 - `DATABASE_ADMIN_URL` is only for migration and cleanup workflows.
 - `DATABASE_URL` must use the least-privileged `leethe_app` role.
+- Optional `CATALOG_DATABASE_SHARD_URLS` values hold deterministically routed title and
+  title-genre rows. Configure matching `CATALOG_DATABASE_SHARD_ADMIN_URLS` before running
+  migrations or role reconciliation. Keep every shard in the same low-latency region as the app.
+- Keep `DATABASE_URL` as the control database. Catalog page manifests and operational tables stay
+  there so homepage reads do not need a scatter-gather query.
+- Before deploying a changed shard count, run migrations and role provisioning for every shard,
+  set `CATALOG_RESHARD_SOURCE_URL` to the existing title store, run
+  `npm run db:reshard-catalog`, and finish with `npm run db:verify`. Changing the shard count changes
+  modulo routing and therefore always requires this backfill.
 - CI applies every migration twice against disposable PostgreSQL to catch invalid or non-idempotent
   SQL before release.
 - Migration runs acquire a database lease and reject overlapping manual or automated migrations.
@@ -40,7 +49,7 @@
 - Configure platform-level rate limiting in addition to the application limits.
 - Set `TRUST_PROXY=true` only when the hosting proxy overwrites client IP headers. Without it, the
   application limiter acts as a generous global circuit breaker.
-- Store `ADMIN_PASSWORD` in the platform secret store to enable `/admin`, rotate it after suspected
+- Store a unique 16+ character `ADMIN_PASSWORD` in the platform secret store to enable `/admin`, rotate it after suspected
   exposure, and place the route behind the platform identity proxy for production teams.
 - Set `ENABLE_PRODUCT_ANALYTICS=true` only after the privacy notice and retention policy are
   approved. The daily cleanup removes analytics after 90 days and resolved support tickets after

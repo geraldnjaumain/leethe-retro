@@ -1,7 +1,15 @@
 import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { type ChangeEvent, type KeyboardEvent, type ReactNode, useMemo, useState } from "react";
+import {
+  type ChangeEvent,
+  type KeyboardEvent,
+  type ReactNode,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import { searchTitles, title, type DiscoverSort, type MediaType } from "@/lib/tmdb";
+import { MediaGlyph } from "@/components/leethe/VisualAssets";
 
 const TITLE_SEEDS: Record<MediaType, string[]> = {
   movie: [
@@ -51,6 +59,7 @@ export function Nav({
   onSortChange,
   query,
   onQueryChange,
+  activeTab,
 }: {
   type: MediaType;
   onTypeChange: (t: MediaType) => void;
@@ -58,15 +67,22 @@ export function Nav({
   onSortChange: (s: DiscoverSort) => void;
   query?: string;
   onQueryChange?: (q: string) => void;
+  activeTab?: "movie" | "tv" | "sports";
 }) {
   const rawQuery = query ?? "";
   const lookupQuery = rawQuery.trim();
+  const [debouncedLookupQuery, setDebouncedLookupQuery] = useState(lookupQuery);
   const [dismissedCompletionFor, setDismissedCompletionFor] = useState("");
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedLookupQuery(lookupQuery), 250);
+    return () => window.clearTimeout(timer);
+  }, [lookupQuery]);
   const autocompleteQuery = useQuery({
-    queryKey: ["title-autocomplete", type, lookupQuery],
-    queryFn: () => searchTitles(type, lookupQuery, 1),
-    enabled: lookupQuery.length >= 2,
+    queryKey: ["title-autocomplete", type, debouncedLookupQuery],
+    queryFn: () => searchTitles(type, debouncedLookupQuery, 1),
+    enabled: debouncedLookupQuery.length >= 2,
     staleTime: 1000 * 60 * 5,
+    refetchOnWindowFocus: false,
     select: (page) => page.results.map(title),
   });
   const completion = useMemo(() => {
@@ -126,34 +142,34 @@ export function Nav({
       <div className="mx-auto flex max-w-[1280px] flex-wrap items-center gap-x-2 gap-y-1.5 px-3 py-1.5 sm:min-h-[38px] sm:flex-nowrap sm:gap-3 sm:px-3 sm:py-0">
         <Link
           to="/"
-          className="group flex h-10 shrink-0 items-center gap-1 rounded-md px-1 outline-none transition-colors duration-200 hover:bg-white/5 focus-visible:ring-2 focus-visible:ring-[oklch(0.7_0.16_240/0.55)] sm:h-auto sm:py-0.5"
+          className="group flex h-10 shrink-0 items-center rounded-md px-1.5 outline-none transition-colors duration-200 hover:bg-white/5 focus-visible:ring-2 focus-visible:ring-[oklch(0.7_0.16_240/0.55)] sm:h-auto sm:py-0.5"
         >
-          <LogoDot className="transition-transform duration-300 group-hover:scale-[1.06]" />
-          <span className="text-[14px] font-semibold tracking-tight text-foreground/95 sm:text-[13px]">
-            leethe
-          </span>
+          <MediaGlyph className="h-6 w-6 text-primary" />
         </Link>
 
         <div
-          className="hidden shrink-0 items-center rounded-full border border-[oklch(0.08_0.005_250)] bg-gradient-to-b from-[oklch(0.3_0.008_250)] to-[oklch(0.18_0.008_250)] p-[2px] shadow-[0_1px_0_oklch(1_0_0/0.1)_inset,0_1px_2px_oklch(0_0_0/0.5)] md:flex"
+          className={`flex shrink-0 items-center gap-1 sm:gap-2 ${activeTab === "sports" ? "hidden" : ""}`}
+          role="group"
           aria-label="Discovery mode"
         >
           <SegBtn active={sort === "popular"} onClick={() => onSortChange("popular")}>
             <SparkGlyph className="h-4 w-4 sm:h-[10px] sm:w-[10px]" />
-            <span>Popular</span>
+            <span className="hidden md:inline">Popular</span>
           </SegBtn>
           <SegBtn active={sort === "new"} onClick={() => onSortChange("new")}>
             <ClockMiniGlyph className="h-4 w-4 sm:h-[10px] sm:w-[10px]" />
-            <span>New</span>
+            <span className="hidden md:inline">New</span>
           </SegBtn>
           <SegBtn active={sort === "rated"} onClick={() => onSortChange("rated")}>
             <StarMiniGlyph className="h-4 w-4 sm:h-[10px] sm:w-[10px]" />
-            <span>Rated</span>
+            <span className="hidden md:inline">Rated</span>
           </SegBtn>
         </div>
 
-        <div className="order-last flex basis-full grow-0 justify-center sm:order-none sm:basis-auto sm:flex-1 sm:grow">
-          <label className="search-field group flex h-11 w-full items-center gap-2 px-3 transition-all duration-200 focus-within:border-[oklch(0.62_0.1_245)] focus-within:shadow-[0_0_0_1px_oklch(0.62_0.1_245/0.45)] sm:h-[26px] sm:max-w-[360px] sm:gap-1.5 sm:px-2">
+        <div
+          className={`order-last flex basis-full grow-0 justify-center sm:order-none sm:basis-auto sm:flex-1 sm:grow ${activeTab === "sports" ? "hidden" : ""}`}
+        >
+          <label className="search-field group flex h-11 w-full items-center gap-2 px-3 transition-all duration-200 sm:h-[26px] sm:max-w-[360px] sm:gap-1.5 sm:px-2">
             <MagnifierGlyph className="h-4 w-4 text-muted-foreground transition-colors duration-200 group-focus-within:text-foreground/90 sm:h-3 sm:w-3" />
             <span className="relative min-w-0 flex-1">
               {completion ? (
@@ -182,15 +198,33 @@ export function Nav({
           </label>
         </div>
 
-        <div className="ml-auto flex shrink-0 items-center rounded-full border border-[oklch(0.08_0.005_250)] bg-gradient-to-b from-[oklch(0.3_0.008_250)] to-[oklch(0.18_0.008_250)] p-[2px] shadow-[0_1px_0_oklch(1_0_0/0.1)_inset,0_1px_2px_oklch(0_0_0/0.5)] sm:ml-0">
-          <SegBtn active={type === "movie"} onClick={() => onTypeChange("movie")}>
+        <div
+          className="ml-auto flex shrink-0 items-center rounded-full border border-[oklch(0.08_0.005_250)] bg-gradient-to-b from-[oklch(0.3_0.008_250)] to-[oklch(0.18_0.008_250)] p-[2px] shadow-[0_1px_0_oklch(1_0_0/0.1)_inset,0_1px_2px_oklch(0_0_0/0.5)] sm:ml-0"
+          role="group"
+          aria-label="Media type"
+        >
+          <SegBtn
+            active={(activeTab || type) === "movie"}
+            onClick={() => onTypeChange("movie")}
+            ariaLabel="Movies"
+          >
             <ReelGlyph className="h-4 w-4 sm:h-[10px] sm:w-[10px]" />
             <span className="hidden sm:inline">Movies</span>
           </SegBtn>
-          <SegBtn active={type === "tv"} onClick={() => onTypeChange("tv")}>
+          <SegBtn
+            active={(activeTab || type) === "tv"}
+            onClick={() => onTypeChange("tv")}
+            ariaLabel="Series"
+          >
             <CrtGlyph className="h-4 w-4 sm:h-[10px] sm:w-[10px]" />
             <span className="hidden sm:inline">Series</span>
           </SegBtn>
+          <Link to="/sports" aria-label="Sports" tabIndex={-1} className="outline-none">
+            <SegBtn active={activeTab === "sports"} onClick={() => {}}>
+              <SportsGlyph className="h-4 w-4 sm:h-[10px] sm:w-[10px]" />
+              <span className="hidden sm:inline">Sports</span>
+            </SegBtn>
+          </Link>
         </div>
       </div>
     </header>
@@ -200,16 +234,20 @@ export function Nav({
 function SegBtn({
   active,
   onClick,
+  ariaLabel,
   children,
 }: {
   active: boolean;
   onClick: () => void;
+  ariaLabel?: string;
   children: ReactNode;
 }) {
   return (
     <button
+      type="button"
       onClick={onClick}
       aria-pressed={active}
+      aria-label={ariaLabel}
       className={[
         "chip-pill-interactive flex h-10 min-w-10 items-center justify-center gap-1 rounded-full px-2 text-[10px] font-medium outline-none sm:h-auto sm:min-w-0 sm:justify-start sm:py-[1px]",
         "transition-all duration-200 active:translate-y-px",
@@ -223,25 +261,6 @@ function SegBtn({
     >
       {children}
     </button>
-  );
-}
-
-export function LogoDot({ className }: { className?: string }) {
-  return (
-    <span
-      className={`relative inline-grid h-6 w-6 place-items-center overflow-hidden rounded-full border border-[oklch(0.08_0.005_250)] bg-gradient-to-b from-[oklch(0.78_0.1_218)] via-[oklch(0.5_0.12_232)] to-[oklch(0.18_0.06_250)] text-white shadow-[0_1px_0_oklch(1_0_0/0.38)_inset,0_-6px_10px_oklch(0_0_0/0.28)_inset,0_1px_1px_oklch(0_0_0/0.55)] sm:h-[18px] sm:w-[18px] ${className ?? ""}`}
-      aria-hidden="true"
-    >
-      <span className="pointer-events-none absolute inset-x-[3px] top-[3px] h-[38%] rounded-full bg-white/24" />
-      <svg
-        className="relative z-10 h-3.5 w-3.5 sm:h-3 sm:w-3"
-        viewBox="0 0 16 16"
-        aria-hidden="true"
-      >
-        <circle cx="8" cy="8" r="5.1" fill="none" stroke="currentColor" strokeWidth="1.4" />
-        <path fill="currentColor" d="M7 5.1 11 8 7 10.9z" />
-      </svg>
-    </span>
   );
 }
 
@@ -289,9 +308,28 @@ export function CrtGlyph({ className }: { className?: string }) {
       strokeLinejoin="round"
       aria-hidden="true"
     >
-      <rect x="2" y="3" width="12" height="8.5" rx="1.2" />
-      <path d="M6 14 L10 14" strokeLinecap="round" />
-      <path d="M8 11.5 L8 14" />
+      <rect x="2" y="5" width="12" height="9" rx="1.5" />
+      <path d="M5 2 L8 5 L11 2" strokeLinecap="round" />
+      <path d="M11 8 L12 8" strokeLinecap="round" />
+      <path d="M11 11 L12 11" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+export function SportsGlyph({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      aria-hidden="true"
+    >
+      <circle cx="8" cy="8" r="6" />
+      <path d="M4.5 4.5 C7 7, 7 9, 4.5 11.5" />
+      <path d="M11.5 4.5 C9 7, 9 9, 11.5 11.5" />
     </svg>
   );
 }

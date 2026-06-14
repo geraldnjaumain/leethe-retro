@@ -2,6 +2,8 @@ import { createHash, createHmac, randomUUID as nodeRandomUUID } from "node:crypt
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { envValue, localCacheDirectory } from "./env.server";
+import { log, serializeError } from "./logger.server";
+import { readBoundedText } from "./upstream-response.server";
 
 type MovieBoxCover = string | { url?: string; path?: string } | null | undefined;
 type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
@@ -113,10 +115,12 @@ const DEFAULT_WEB_ORIGIN = "https://netfilm.world";
 const SEARCH_PATH = "/wefeed-mobile-bff/subject-api/search";
 const RESOURCE_PATH = "/wefeed-mobile-bff/subject-api/resource";
 const RETRY_STATUS_CODES = new Set([403, 407, 429, 500, 502, 503, 504]);
-const HOST_TIMEOUT_MS = 3500;
+const HOST_TIMEOUT_MS = 15000;
 const HOST_COOLDOWN_MS = 45_000;
 const MAX_JSON_BYTES = 5_000_000;
 const SIGNATURE_BODY_MAX_BYTES = 102_400;
+const RESOURCE_PAGE_SIZE = 20;
+const RESOURCE_PAGE_LIMIT = 5;
 
 let runtimeToken: string | null = null;
 let preferredHost: string | null = null;
@@ -582,20 +586,16 @@ async function apiRequest<T>(
         signal: AbortSignal.timeout(HOST_TIMEOUT_MS),
       });
       absorbXUser(res.headers);
-      const text = await res.text();
-      const contentLength = Number(res.headers.get("content-length") || 0);
-      if (
-        contentLength > MAX_JSON_BYTES ||
-        new TextEncoder().encode(text).byteLength > MAX_JSON_BYTES
-      ) {
-        throw new Error(`Host ${base} response exceeded the JSON byte limit`);
-      }
+      const text = await readBoundedText(res, MAX_JSON_BYTES);
 
-      if (RETRY_STATUS_CODES.has(res.status) || !res.ok) {
+      if (RETRY_STATUS_CODES.has(res.status)) {
         lastError = new Error(`Host ${base} returned ${res.status}: ${responseSnippet(text)}`);
         if (base === preferredHost) preferredHost = null;
         hostCooldownUntil.set(base, Date.now() + HOST_COOLDOWN_MS);
         continue;
+      }
+      if (!res.ok) {
+        throw new Error(`Provider rejected the request (${res.status}): ${responseSnippet(text)}`);
       }
 
       const json = parseJsonResponse(text, base, res.status, res.headers.get("content-type"));
@@ -654,11 +654,12 @@ async function h5ApiGet<T = unknown>(
   const res = await fetch(url, {
     method: "GET",
     headers,
-    signal: AbortSignal.timeout(8000),
+    signal: AbortSignal.timeout(15000),
   });
 
-  const text = await res.text();
+  const text = await readBoundedText(res, MAX_JSON_BYTES);
   if (text.includes("404 page")) return null;
+  if (!res.ok) throw new Error(`H5 API returned ${res.status}: ${text.slice(0, 180)}`);
 
   const sanitized = text.replace(/:\s*(\d{16,})/g, ': "$1"');
   const json = JSON.parse(sanitized) as unknown;
@@ -685,10 +686,10 @@ async function h5ApiPost<T>(path: string, body: Record<string, unknown>) {
       Referer: `${webOrigin}/`,
     },
     body: bodyStr,
-    signal: AbortSignal.timeout(8000),
+    signal: AbortSignal.timeout(15000),
   });
 
-  const text = await res.text();
+  const text = await readBoundedText(res, MAX_JSON_BYTES);
   if (text.includes("404 page")) return null;
   if (!res.ok) throw new Error(`H5 API returned ${res.status}: ${text.slice(0, 180)}`);
   const json = JSON.parse(text.replace(/:\s*(\d{16,})/g, ': "$1"')) as unknown;
@@ -792,10 +793,10 @@ async function getMovieBoxStreams(
   if (!safeSubjectId) return [];
 
   let page = 1;
-  const perPage = 100;
+  const perPage = RESOURCE_PAGE_SIZE;
   let allStreams: MovieBoxStreamLink[] = [];
 
-  while (page <= 5) {
+  while (page <= RESOURCE_PAGE_LIMIT) {
     const data = await apiGet<MovieBoxResourceResponse>(RESOURCE_PATH, {
       subjectId: safeSubjectId,
       resolution: cleanPositiveInt(resolution, 2160) || 1080,
@@ -830,15 +831,28 @@ async function getMovieBoxStreams(
       .filter((stream) => stream.url && stream.url.startsWith("http"));
 
     allStreams = allStreams.concat(parsed);
-    
+
     if (data.list.length < perPage) break;
-    
-    // If we only need a specific episode and we found it in this page, we should fetch one more page 
-    // just in case the dubs span across pages, but to be simple we just fetch all up to 5 pages.
+
     page++;
   }
 
-  return allStreams;
+  return dedupeMovieBoxStreams(allStreams);
+}
+
+function dedupeMovieBoxStreams(streams: MovieBoxStreamLink[]) {
+  const seen = new Set<string>();
+  return streams.filter((stream) => {
+    const key = [
+      stream.url,
+      stream.resolution,
+      stream.audioLabel?.toLowerCase() || "",
+      stream.languageCode?.toLowerCase() || "",
+    ].join(":");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function normalizeMovieBoxSubjectId(value?: string | number) {
@@ -883,7 +897,9 @@ async function loadSubjectIdCache() {
       const data = await readFile(join(root, "moviebox_subject_ids.json"), "utf8");
       const parsed = JSON.parse(data) as Record<string, string>;
       for (const [k, v] of Object.entries(parsed)) subjectIdMemoryCache.set(k, v);
-    } catch {}
+    } catch {
+      // The local cache is opportunistic; a missing or malformed file is a cache miss.
+    }
   }
   subjectIdCacheLoaded = true;
 }
@@ -978,10 +994,19 @@ export async function resolveStreams(
       error: streams.length ? undefined : "No playable stream was returned for this title.",
     };
   } catch (err) {
+    log("warn", "stream_resolver_failed", {
+      type,
+      tmdbId: Boolean(tmdbId),
+      season,
+      episode,
+      error: serializeError(err),
+    });
     return {
       success: false,
       streams: [],
-      error: err instanceof Error ? err.message : "Stream source is temporarily unavailable.",
+      error: isMissingSigningKey(err)
+        ? "The playback provider is not configured."
+        : "The playback provider is temporarily unavailable.",
     };
   }
 }

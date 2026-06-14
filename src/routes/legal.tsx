@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import type { ReactNode } from "react";
-import { LogoDot } from "@/components/leethe/Nav";
+import { BrandMark } from "@/components/leethe/VisualAssets";
 import { getPublicLegalConfig } from "@/lib/legal";
 
 export const Route = createFileRoute("/legal")({
@@ -20,7 +20,7 @@ function LegalPage() {
     <main className="mx-auto min-h-screen max-w-[820px] px-4 py-8 text-[13px] leading-6 text-foreground/85">
       <header className="mb-8 flex items-center justify-between border-b border-[var(--aluminum-line)] pb-4">
         <Link to="/" className="flex items-center gap-2 text-foreground">
-          <LogoDot />
+          <BrandMark />
           <span className="font-semibold">leethe</span>
         </Link>
         <Link to="/" className="text-[12px] text-muted-foreground hover:text-foreground">

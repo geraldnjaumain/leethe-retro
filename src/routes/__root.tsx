@@ -7,10 +7,10 @@ import {
   HeadContent,
   Scripts,
 } from "@tanstack/react-router";
-import { useEffect, type ReactNode } from "react";
+import type { ReactNode } from "react";
 
 import appCss from "../styles.css?url";
-import { LogoDot } from "../components/leethe/Nav";
+import { MediaGlyph } from "../components/leethe/VisualAssets";
 import { ProductTelemetry } from "../components/leethe/ProductTelemetry";
 
 /* ── Retro panel wrapper used by error pages ─────────────────── */
@@ -24,7 +24,7 @@ function AluminumPanel({ children }: { children: ReactNode }) {
 
         {/* Panel body */}
         <div className="flex flex-col items-center gap-4 px-6 py-8 text-center">
-          <LogoDot />
+          <MediaGlyph className="h-9 w-9 text-primary" />
           {children}
         </div>
       </div>
@@ -55,11 +55,7 @@ function NotFoundComponent() {
 }
 
 function ErrorComponent({ error, reset }: { error: Error; reset: () => void }) {
-  console.error(error);
   const router = useRouter();
-  useEffect(() => {
-    console.error("[Leethe] Unhandled error:", error);
-  }, [error]);
 
   return (
     <AluminumPanel>
@@ -123,10 +119,9 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       },
     ],
     links: [
-      { rel: "icon", type: "image/svg+xml", href: "/favicon.svg" },
-      { rel: "mask-icon", href: "/favicon.svg", color: "#38a9ff" },
-      { rel: "manifest", href: "/site.webmanifest" },
       { rel: "stylesheet", href: appCss },
+      { rel: "icon", type: "image/svg+xml", href: "/favicon.svg" },
+      { rel: "manifest", href: "/site.webmanifest" },
     ],
   }),
   shellComponent: RootShell,

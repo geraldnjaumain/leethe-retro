@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { assertAdminPassword } from "../src/lib/product-data.server";
-import { validateProductEventInput, validateSupportTicketInput } from "../src/lib/product";
+import {
+  validateBulkTicketUpdateInput,
+  validateProductEventInput,
+  validateSupportTicketInput,
+} from "../src/lib/product";
 import { getMovieBoxProviderConfig } from "../src/lib/moviebox.server";
 
 const originalEnv = {
@@ -54,6 +58,19 @@ describe("product operations validation", () => {
     expect(() => validateProductEventInput({ eventName: "password_captured" })).toThrow(
       "Invalid product event",
     );
+  });
+
+  it("validates and deduplicates bulk ticket updates", () => {
+    expect(
+      validateBulkTicketUpdateInput({
+        password: "secret",
+        ids: ["TKT-ABC123", "TKT-ABC123", "bad"],
+        status: "resolved",
+      }),
+    ).toEqual({ password: "secret", ids: ["TKT-ABC123"], status: "resolved" });
+    expect(() =>
+      validateBulkTicketUpdateInput({ password: "secret", ids: ["bad"], status: "resolved" }),
+    ).toThrow("Invalid bulk ticket update");
   });
 
   it("protects admin reads with the configured password", () => {

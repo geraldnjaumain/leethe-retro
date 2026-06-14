@@ -1,253 +1,489 @@
 import { createFileRoute, Link, useParams } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { useState, useMemo } from "react";
-import { TopBar } from "@/components/leethe/Nav"; // Suppose I need to import TopBar, or I'll just write an inline header
-import { fetchDetail, fetchSeason, title as titleOf, year as yearOf, still } from "@/lib/tmdb";
-import {
-  resolveEpisodeDownloads,
-  resolveWatchStreams,
-} from "@/lib/stream";
-import { LogoDot } from "@/components/leethe/Nav";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { MediaGlyph } from "@/components/leethe/VisualAssets";
 import { SelectMenu } from "@/components/leethe/SelectMenu";
+import {
+  folderDownloadCapability,
+  folderDownloadErrorMessage,
+  formatDownloadBytes,
+  totalDownloadBytes,
+  type FolderDownloadCapability,
+} from "@/lib/download-folder";
+import { episodeDownloadFileName, selectPreferredDownloadOption } from "@/lib/player-media";
+import { recordClientEvent } from "@/lib/product-telemetry";
+import { resolveEpisodeDownloads } from "@/lib/stream";
+import { fetchDetail, fetchSeason, title as titleOf, year as yearOf } from "@/lib/tmdb";
+
+type DownloadOption = {
+  url: string;
+  quality: string;
+  resolution: number;
+  audioLabel?: string;
+  size?: number;
+};
+
+type PreparedDownload = {
+  season: number;
+  episode: number;
+  label: string;
+  success: boolean;
+  options: DownloadOption[];
+  error?: string;
+};
+
+type DownloadLink = DownloadOption & {
+  season: number;
+  episode: number;
+  label: string;
+  audioLabel: string;
+  key: string;
+};
+
+type DownloadProgress = {
+  bytes: number;
+  total: number;
+  status: "pending" | "downloading" | "completed" | "cancelled" | "error";
+  error?: string;
+};
+
+type WritableHandle = {
+  write: (data: Uint8Array) => Promise<void>;
+  close: () => Promise<void>;
+  abort?: () => Promise<void>;
+};
+
+type DirectoryHandle = {
+  name: string;
+  getDirectoryHandle: (name: string, options: { create: boolean }) => Promise<DirectoryHandle>;
+  getFileHandle: (
+    name: string,
+    options: { create: boolean },
+  ) => Promise<{ createWritable: () => Promise<WritableHandle> }>;
+  queryPermission?: (options: { mode: "readwrite" }) => Promise<PermissionState>;
+  requestPermission?: (options: { mode: "readwrite" }) => Promise<PermissionState>;
+};
+
+type DirectoryPickerWindow = Window & {
+  showDirectoryPicker?: (options?: { id?: string; mode?: "readwrite" }) => Promise<DirectoryHandle>;
+};
 
 export const Route = createFileRoute("/download/tv/$id")({
   head: () => ({ meta: [{ title: "Leethe - Download Series" }] }),
   component: DownloadTvPage,
 });
 
+function messageFrom(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback;
+}
+
 function DownloadTvPage() {
   const { id } = useParams({ from: "/download/tv/$id" });
-  const { data: detail, isLoading: isLoadingDetail } = useQuery({
+  const detailQuery = useQuery({
     queryKey: ["detail", "tv", id],
     queryFn: () => fetchDetail("tv", id),
   });
+  const detail = detailQuery.data;
+  const seasons = useMemo(
+    () => (detail?.seasons ?? []).filter((season) => season.season_number > 0),
+    [detail?.seasons],
+  );
+  const [activeSeason, setActiveSeason] = useState(1);
 
-  const seasons = (detail?.seasons ?? []).filter((s) => s.season_number > 0);
-  const [activeSeason, setActiveSeason] = useState<number>(1);
+  useEffect(() => {
+    if (seasons.length && !seasons.some((season) => season.season_number === activeSeason)) {
+      setActiveSeason(seasons[0].season_number);
+    }
+  }, [activeSeason, seasons]);
 
-  // Try to set first available season when data loads
-  if (seasons.length > 0 && activeSeason === 1 && seasons[0].season_number !== 1) {
-    setActiveSeason(seasons[0].season_number);
-  }
-
-  const { data: seasonData, isLoading: isLoadingSeason } = useQuery({
+  const seasonQuery = useQuery({
     queryKey: ["season", id, activeSeason],
-    enabled: Boolean(activeSeason),
+    enabled: Boolean(detail && activeSeason),
     queryFn: () => fetchSeason(id, activeSeason),
   });
+  const episodes = seasonQuery.data?.episodes ?? [];
 
   const [selectedEpisodes, setSelectedEpisodes] = useState<Set<number>>(new Set());
   const [isPreparing, setIsPreparing] = useState(false);
-  const [preparedData, setPreparedData] = useState<Record<string, unknown>[]>([]);
-  const [preferredQuality, setPreferredQuality] = useState<string>("1080p");
-  const [preferredAudio, setPreferredAudio] = useState<string>("Any");
-  
-  const [downloadProgress, setDownloadProgress] = useState<Record<string, { bytes: number, total: number, status: 'pending' | 'downloading' | 'completed' | 'error', error?: string }>>({});
+  const [preparedData, setPreparedData] = useState<PreparedDownload[]>([]);
+  const [preferredQuality, setPreferredQuality] = useState("1080p");
+  const [preferredAudio, setPreferredAudio] = useState("Any");
+  const [preparationError, setPreparationError] = useState("");
+  const [folderError, setFolderError] = useState("");
+  const [downloadProgress, setDownloadProgress] = useState<Record<string, DownloadProgress>>({});
   const [isDownloadingFolder, setIsDownloadingFolder] = useState(false);
+  const [folderCapability, setFolderCapability] = useState<FolderDownloadCapability | "checking">(
+    "checking",
+  );
+  const [folderName, setFolderName] = useState("");
+  const [manualDownloadIndex, setManualDownloadIndex] = useState(0);
+  const directoryRef = useRef<DirectoryHandle | undefined>(undefined);
+  const activeDownloadAbortRef = useRef<AbortController | undefined>(undefined);
+  const cancelRequestedRef = useRef(false);
+  const subjectIdRef = useRef<string | undefined>(undefined);
+  const busy = isPreparing || isDownloadingFolder;
 
-  const episodes = seasonData?.episodes ?? [];
+  useEffect(() => {
+    setFolderCapability(
+      folderDownloadCapability(
+        window.isSecureContext,
+        typeof (window as DirectoryPickerWindow).showDirectoryPicker === "function",
+      ),
+    );
+  }, []);
 
   const availableAudios = useMemo(() => {
     const audios = new Set<string>();
-    for (const ep of preparedData) {
-      if (!ep.options) continue;
-      for (const opt of ep.options as any[]) {
-        if (opt.audioLabel) audios.add(opt.audioLabel);
-      }
+    for (const prepared of preparedData) {
+      for (const option of prepared.options) audios.add(option.audioLabel?.trim() || "Default");
     }
-    return ["Any", ...Array.from(audios).filter(a => a !== "Default")];
+    return ["Any", ...Array.from(audios).sort()];
   }, [preparedData]);
 
-  const downloadLinks = useMemo(() => {
-    return preparedData.map((ep: any) => {
-      if (!ep.success || !ep.options?.length) return null;
-      let opts = ep.options;
-      if (preferredAudio !== "Any") {
-        const filtered = opts.filter((o: any) => o.audioLabel === preferredAudio || (preferredAudio === "Default" && !o.audioLabel));
-        if (filtered.length > 0) opts = filtered;
-      }
-      const match = opts.find((o: any) => o.quality === preferredQuality) || opts[0];
-      return { 
-        label: ep.label, 
-        url: match.url, 
-        audioLabel: match.audioLabel || "Default", 
-        quality: match.quality, 
-        size: match.size 
-      };
-    }).filter(Boolean);
-  }, [preparedData, preferredQuality, preferredAudio]);
+  const downloadLinks = useMemo(
+    () =>
+      preparedData.flatMap<DownloadLink>((prepared) => {
+        if (!prepared.success || !prepared.options.length) return [];
+        const match = selectPreferredDownloadOption(
+          prepared.options,
+          preferredQuality,
+          preferredAudio,
+        );
+        if (!match) return [];
+        return [
+          {
+            ...match,
+            season: prepared.season,
+            episode: prepared.episode,
+            label: prepared.label,
+            audioLabel: match.audioLabel?.trim() || "Default",
+            key: `${prepared.season}:${prepared.episode}:${match.url}`,
+          },
+        ];
+      }),
+    [preparedData, preferredAudio, preferredQuality],
+  );
+  const unavailableDownloads = useMemo(
+    () => preparedData.filter((prepared) => !prepared.success || !prepared.options.length),
+    [preparedData],
+  );
+  const failedFolderDownloads = useMemo(
+    () =>
+      downloadLinks.filter((link) => {
+        const status = downloadProgress[link.key]?.status;
+        return status === "error" || status === "cancelled";
+      }),
+    [downloadLinks, downloadProgress],
+  );
+  const queueSummary = useMemo(
+    () =>
+      Object.values(downloadProgress).reduce(
+        (summary, progress) => {
+          summary[progress.status] += 1;
+          return summary;
+        },
+        { pending: 0, downloading: 0, completed: 0, cancelled: 0, error: 0 },
+      ),
+    [downloadProgress],
+  );
+  const downloadSize = useMemo(() => totalDownloadBytes(downloadLinks), [downloadLinks]);
+  const seasonFolderName = useMemo(
+    () =>
+      `${
+        detail
+          ? titleOf(detail)
+              .replace(/[^a-zA-Z0-9 -]/g, "")
+              .trim() || "Series"
+          : "Series"
+      } Season ${activeSeason}`,
+    [activeSeason, detail],
+  );
+  const nextManualDownload = downloadLinks[manualDownloadIndex];
 
-  const toggleEpisode = (ep: number) => {
+  useEffect(() => {
+    setManualDownloadIndex(0);
+  }, [preferredAudio, preferredQuality, preparedData]);
+
+  const toggleEpisode = (episode: number) => {
     const next = new Set(selectedEpisodes);
-    if (next.has(ep)) next.delete(ep);
-    else next.add(ep);
+    if (next.has(episode)) next.delete(episode);
+    else next.add(episode);
     setSelectedEpisodes(next);
+    setPreparedData([]);
+    subjectIdRef.current = undefined;
+    setPreparationError("");
   };
 
   const selectAll = () => {
-    if (selectedEpisodes.size === episodes.length) {
-      setSelectedEpisodes(new Set());
-    } else {
-      setSelectedEpisodes(new Set(episodes.map((e) => e.episode_number)));
-    }
+    setSelectedEpisodes(
+      selectedEpisodes.size === episodes.length
+        ? new Set()
+        : new Set(episodes.map((episode) => episode.episode_number)),
+    );
+    setPreparedData([]);
+    subjectIdRef.current = undefined;
+    setPreparationError("");
   };
 
-  const handlePrepare = async () => {
-    if (!detail || selectedEpisodes.size === 0) return;
-    setIsPreparing(true);
+  const changeSeason = (season: number) => {
+    setActiveSeason(season);
+    setSelectedEpisodes(new Set());
     setPreparedData([]);
-    try {
-      // Fetch the exact provider subjectId using the first selected episode
-      // This mirrors the watch page's behavior and prevents search misses
-      const firstEp = Array.from(selectedEpisodes)[0];
-      const watchResult = await resolveWatchStreams({
-        data: {
-          title: titleOf(detail),
-          type: "tv",
-          tmdbId: id,
-          year: yearOf(detail)?.toString(),
-          season: activeSeason,
-          episode: firstEp,
-          runtimeMinutes: detail.runtime ?? detail.episode_run_time?.[0],
-          seasonCount: detail.number_of_seasons,
-        }
-      }).catch(() => null);
+    subjectIdRef.current = undefined;
+    setPreparationError("");
+    setFolderError("");
+    setDownloadProgress({});
+  };
 
+  const prepareEpisodes = async (episodeNumbers: number[], replace: boolean) => {
+    if (!detail || episodeNumbers.length === 0) return;
+    setIsPreparing(true);
+    if (replace) setPreparedData([]);
+    setPreparationError("");
+    setFolderError("");
+    if (replace) setDownloadProgress({});
+    try {
+      const episodeLabels = new Map(
+        episodes.map((episode) => [
+          episode.episode_number,
+          episode.name || `Episode ${episode.episode_number}`,
+        ]),
+      );
       const result = await resolveEpisodeDownloads({
         data: {
           title: titleOf(detail),
           type: "tv",
           tmdbId: id,
-          year: yearOf(detail)?.toString(),
+          year: yearOf(detail) || undefined,
           runtimeMinutes: detail.runtime ?? detail.episode_run_time?.[0],
           seasonCount: detail.number_of_seasons,
-          subjectId: watchResult?.subjectId,
-          episodes: Array.from(selectedEpisodes).map((ep) => ({
-            season: activeSeason,
-            episode: ep,
-          })),
+          subjectId: subjectIdRef.current,
+          episodes: episodeNumbers
+            .sort((a, b) => a - b)
+            .map((episode) => ({
+              season: activeSeason,
+              episode,
+              label: episodeLabels.get(episode),
+            })),
         },
       });
-      setPreparedData(result.downloads);
-    } catch (err) {
-      console.error(err);
+      subjectIdRef.current = result.subjectId;
+      setPreparedData((current) => {
+        if (replace) return result.downloads;
+        const updates = new Map(result.downloads.map((download) => [download.episode, download]));
+        return current.map((download) => updates.get(download.episode) ?? download);
+      });
+    } catch (error) {
+      setPreparationError(messageFrom(error, "Download links could not be prepared."));
     } finally {
       setIsPreparing(false);
     }
   };
 
-  const handleDownloadAll = () => {
-    if (downloadLinks.length === 0) return;
-    downloadLinks.forEach((link, index) => {
-      setTimeout(() => {
-        const a = document.createElement("a");
-        a.href = link.url;
-        a.target = "_blank";
-        a.download = "";
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-      }, index * 800);
-    });
+  const handlePrepare = () => prepareEpisodes(Array.from(selectedEpisodes), true);
+
+  const chooseDownloadFolder = async () => {
+    setFolderError("");
+    const pickerWindow = window as DirectoryPickerWindow;
+    const picker = pickerWindow.showDirectoryPicker;
+    if (!picker) {
+      setFolderCapability(
+        folderDownloadCapability(window.isSecureContext, typeof picker === "function"),
+      );
+      return;
+    }
+
+    try {
+      const root = await pickerWindow.showDirectoryPicker?.({
+        id: "leethe-series-downloads",
+        mode: "readwrite",
+      });
+      if (!root) throw new Error("The download folder could not be opened.");
+      directoryRef.current = root;
+      setFolderName(root.name || "Selected folder");
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") return;
+      const message = messageFrom(error, "Folder access could not be opened.");
+      setFolderError(
+        /gesture|security|not allowed/i.test(message)
+          ? "The browser could not open folder access. Try Chrome or Edge over HTTPS, or use the individual downloads below."
+          : message,
+      );
+    }
   };
 
-  const handleDownloadFolder = async () => {
+  const handleDownloadFolder = async (retryFailed = false) => {
+    setFolderError("");
+    if (!detail) return;
+    const root = directoryRef.current;
+    if (!root) {
+      setFolderError("Choose a download folder before starting the queue.");
+      return;
+    }
+    const queuedLinks = retryFailed ? failedFolderDownloads : downloadLinks;
+    if (!queuedLinks.length) {
+      setFolderError("Prepare at least one direct download before starting the queue.");
+      return;
+    }
+
+    let failedCount = 0;
     try {
-      console.log("Download folder button clicked!");
-      if (!('showDirectoryPicker' in window)) {
-        alert("Your browser does not support Native Folder Downloads. Please use a Chromium-based browser (Chrome, Edge, Brave).");
-        return;
+      const currentPermission = await root.queryPermission?.({ mode: "readwrite" });
+      if (currentPermission && currentPermission !== "granted") {
+        const requestedPermission = await root.requestPermission?.({ mode: "readwrite" });
+        if (requestedPermission !== "granted") {
+          throw new Error("Folder access was not granted.");
+        }
       }
-
-      if (downloadLinks.length === 0) {
-        alert("No links ready to download!");
-        return;
-      }
-
-      const safeTitle = (t || "Series").replace(/[^a-zA-Z0-9 ]/g, '');
-      const folderName = `${safeTitle} Season ${activeSeason}`.trim();
-
-      const dirHandle = await (window as any).showDirectoryPicker();
-      const seriesDirHandle = await dirHandle.getDirectoryHandle(folderName, { create: true });
-
+      const directory = await root.getDirectoryHandle(seasonFolderName, { create: true });
+      cancelRequestedRef.current = false;
       setIsDownloadingFolder(true);
-      
-      const initialProgress: Record<string, any> = {};
-      downloadLinks.forEach(link => {
-        initialProgress[link.url] = { bytes: 0, total: link.size || 0, status: 'pending' };
-      });
-      setDownloadProgress(initialProgress);
+      setDownloadProgress((current) => ({
+        ...current,
+        ...Object.fromEntries(
+          queuedLinks.map((link) => [
+            link.key,
+            { bytes: 0, total: link.size || 0, status: "pending" as const },
+          ]),
+        ),
+      }));
 
-      for (let i = 0; i < downloadLinks.length; i++) {
-        const link = downloadLinks[i];
-        const epNum = String(i + 1).padStart(2, '0');
-        const safeLabel = (link.label || "").replace(/[^a-zA-Z0-9 -]/g, '').trim();
-        const filename = `${epNum} - ${safeLabel} [${link.quality}].mp4`;
-
-        setDownloadProgress(prev => ({ ...prev, [link.url]: { ...prev[link.url], status: 'downloading' } }));
-
+      for (const link of queuedLinks) {
+        if (cancelRequestedRef.current) {
+          setDownloadProgress((current) => ({
+            ...current,
+            [link.key]: { ...current[link.key], status: "cancelled" },
+          }));
+          continue;
+        }
+        let writable: WritableHandle | undefined;
+        const controller = new AbortController();
+        activeDownloadAbortRef.current = controller;
+        setDownloadProgress((current) => ({
+          ...current,
+          [link.key]: { ...current[link.key], status: "downloading" },
+        }));
         try {
-          const fileHandle = await seriesDirHandle.getFileHandle(filename, { create: true });
-          const writable = await fileHandle.createWritable();
-
-          const response = await fetch(link.url);
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          
-          const contentLength = response.headers.get('content-length');
-          const total = contentLength ? parseInt(contentLength, 10) : link.size || 0;
-          
-          if (!response.body) throw new Error("No response body");
-
+          const filename = episodeDownloadFileName(
+            titleOf(detail),
+            link.season,
+            link.episode,
+            link.label,
+            link.quality,
+          );
+          const file = await directory.getFileHandle(filename, { create: true });
+          writable = await file.createWritable();
+          const response = await fetch(link.url, { signal: controller.signal });
+          if (!response.ok) throw new Error(`Download returned HTTP ${response.status}.`);
+          if (!response.body) throw new Error("The download response had no body.");
+          const contentLength = Number(response.headers.get("content-length") || link.size || 0);
           const reader = response.body.getReader();
-          let bytesLoaded = 0;
+          let bytes = 0;
+          let lastProgressUpdate = 0;
 
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
             await writable.write(value);
-            bytesLoaded += value.length;
-            
-            if (bytesLoaded % (1024 * 1024) < value.length || bytesLoaded === total) {
-              setDownloadProgress(prev => ({
-                ...prev,
-                [link.url]: { ...prev[link.url], bytes: bytesLoaded, total: total || bytesLoaded }
+            bytes += value.byteLength;
+            const now = Date.now();
+            if (now - lastProgressUpdate >= 250) {
+              lastProgressUpdate = now;
+              setDownloadProgress((current) => ({
+                ...current,
+                [link.key]: {
+                  ...current[link.key],
+                  bytes,
+                  total: contentLength || bytes,
+                  status: "downloading",
+                },
               }));
             }
           }
-
           await writable.close();
-          setDownloadProgress(prev => ({ ...prev, [link.url]: { ...prev[link.url], status: 'completed' } }));
-
-        } catch (err: any) {
-          console.error("Error downloading", link.url, err);
-          let errorMessage = err.message;
-          if (err.name === 'TypeError' && err.message.includes('fetch')) {
-             errorMessage = "CORS blocked direct download.";
-          }
-          setDownloadProgress(prev => ({ ...prev, [link.url]: { ...prev[link.url], status: 'error', error: errorMessage } }));
+          recordClientEvent("download", {
+            mediaType: "tv",
+            tmdbId: id,
+            season: link.season,
+            episode: link.episode,
+          });
+          setDownloadProgress((current) => ({
+            ...current,
+            [link.key]: {
+              ...current[link.key],
+              bytes,
+              total: contentLength || bytes,
+              status: "completed",
+            },
+          }));
+        } catch (error) {
+          await writable?.abort?.().catch(() => undefined);
+          const errorMessage = folderDownloadErrorMessage(error);
+          const cancelled =
+            cancelRequestedRef.current || (error instanceof Error && error.name === "AbortError");
+          if (!cancelled) failedCount += 1;
+          setDownloadProgress((current) => ({
+            ...current,
+            [link.key]: {
+              ...current[link.key],
+              status: cancelled ? "cancelled" : "error",
+              error: cancelled ? "Cancelled" : errorMessage,
+            },
+          }));
+        } finally {
+          activeDownloadAbortRef.current = undefined;
         }
       }
-    } catch (err: any) {
-      if (err.name !== 'AbortError') {
-        alert("Action failed: " + err.message + "\nStack: " + err.stack);
-        console.error(err);
+      if (failedCount) {
+        setFolderError(
+          `${failedCount} episode${failedCount === 1 ? "" : "s"} could not be streamed into the folder. Use the individual download buttons below for those files.`,
+        );
+      }
+    } catch (error) {
+      if (!(error instanceof Error && error.name === "AbortError")) {
+        setFolderError(messageFrom(error, "Folder download could not start."));
       }
     } finally {
       setIsDownloadingFolder(false);
     }
   };
 
-  if (isLoadingDetail) {
-    return <div className="min-h-screen text-center p-10 text-muted-foreground">Loading...</div>;
-  }
+  const cancelFolderDownload = () => {
+    cancelRequestedRef.current = true;
+    activeDownloadAbortRef.current?.abort();
+  };
 
-  if (!detail) {
+  const recordDirectDownload = (download: DownloadLink) => {
+    recordClientEvent("download", {
+      mediaType: "tv",
+      tmdbId: id,
+      season: download.season,
+      episode: download.episode,
+    });
+  };
+
+  if (detailQuery.isLoading) {
     return (
-      <div className="min-h-screen text-center p-10 text-muted-foreground">Series not found</div>
+      <div className="min-h-screen p-10 text-center text-muted-foreground">Loading series...</div>
     );
   }
 
-  const t = titleOf(detail);
+  if (detailQuery.error || !detail) {
+    return (
+      <div className="min-h-screen p-10 text-center text-muted-foreground">
+        <p>Series details could not be loaded.</p>
+        <button
+          type="button"
+          onClick={() => detailQuery.refetch()}
+          className="btn-aqua btn-aqua-interactive mt-3 rounded-full px-4 py-1.5 text-[11px]"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  const title = titleOf(detail);
 
   return (
     <div className="min-h-screen bg-[oklch(0.12_0.005_250)]">
@@ -258,105 +494,153 @@ function DownloadTvPage() {
             params={{ type: "tv", id }}
             className="chip-pill chip-pill-interactive inline-flex items-center gap-1 rounded-full px-3 py-1 text-[11px]"
           >
-            Back to Title
+            Back to title
           </Link>
           <div className="ml-1 flex items-center gap-1.5">
-            <LogoDot />
-            <span className="text-[14px] font-semibold text-foreground/95">Download Center</span>
+            <MediaGlyph className="h-5 w-5 text-primary/80" />
+            <span className="text-[14px] font-semibold text-foreground/95">Download center</span>
           </div>
         </div>
       </header>
 
-      <main className="mx-auto max-w-[1000px] px-4 py-8 animate-fade-in">
-        <h1 className="text-[24px] font-semibold text-foreground tracking-tight">{t}</h1>
-        <p className="text-[12px] text-muted-foreground mt-1 mb-6">
-          Select episodes to mass download.
+      <main className="mx-auto max-w-[1000px] animate-fade-in px-4 py-8">
+        <h1 className="text-[24px] font-semibold tracking-tight text-foreground">{title}</h1>
+        <p className="mb-6 mt-1 text-[12px] text-muted-foreground">
+          Select episodes, prepare direct files, then choose a folder or download episodes one at a
+          time. HLS-only episodes cannot be saved as MP4 files.
         </p>
 
-        <div className="grid md:grid-cols-[1fr_300px] gap-6">
+        <div className="grid gap-6 md:grid-cols-[1fr_300px]">
           <section>
-            <div className="flex gap-2 flex-wrap mb-4">
-              {seasons.map((s) => (
+            <div className="mb-4 flex flex-wrap gap-2">
+              {seasons.map((season) => (
                 <button
-                  key={s.id}
-                  onClick={() => {
-                    setActiveSeason(s.season_number);
-                    setSelectedEpisodes(new Set());
-                    setPreparedData([]);
-                  }}
-                  className={`chip-pill chip-pill-interactive rounded-full px-3 py-1 text-[11px] ${
-                    activeSeason === s.season_number ? "chip-pill-active" : ""
+                  type="button"
+                  key={season.id}
+                  onClick={() => changeSeason(season.season_number)}
+                  disabled={busy}
+                  aria-pressed={activeSeason === season.season_number}
+                  className={`chip-pill chip-pill-interactive rounded-full px-3 py-1 text-[11px] disabled:cursor-wait disabled:opacity-50 ${
+                    activeSeason === season.season_number ? "chip-pill-active" : ""
                   }`}
                 >
-                  Season {s.season_number}
+                  {season.name}
                 </button>
               ))}
             </div>
 
             <div className="panel-aluminum rounded-md p-4">
-              <div className="flex items-center justify-between mb-4 pb-3 border-b border-[var(--aluminum-line)]">
+              <div className="mb-4 flex items-center justify-between border-b border-[var(--aluminum-line)] pb-3">
                 <h2 className="text-[14px] font-medium text-foreground">Episodes</h2>
                 <button
+                  type="button"
                   onClick={selectAll}
-                  className="text-[11px] text-primary/80 hover:text-primary transition-colors"
+                  disabled={!episodes.length || busy}
+                  className="text-[11px] text-primary/80 transition-colors hover:text-primary disabled:opacity-40"
                 >
-                  {selectedEpisodes.size === episodes.length ? "Deselect All" : "Select All"}
+                  {selectedEpisodes.size === episodes.length && episodes.length
+                    ? "Deselect all"
+                    : "Select all"}
                 </button>
               </div>
 
-              {isLoadingSeason ? (
-                <div className="text-center py-6 text-[12px] text-muted-foreground">
+              {seasonQuery.error ? (
+                <div className="py-6 text-center text-[12px] text-muted-foreground">
+                  <p>Episodes could not be loaded.</p>
+                  <button
+                    type="button"
+                    onClick={() => seasonQuery.refetch()}
+                    className="btn-aqua btn-aqua-interactive mt-3 rounded-full px-3 py-1 text-[11px]"
+                  >
+                    Retry
+                  </button>
+                </div>
+              ) : seasonQuery.isLoading ? (
+                <div className="py-6 text-center text-[12px] text-muted-foreground">
                   Loading season...
                 </div>
-              ) : (
+              ) : episodes.length ? (
                 <ul className="space-y-1">
-                  {episodes.map((ep) => (
-                    <li key={ep.id}>
-                      <label className="flex items-center gap-3 p-2 rounded hover:bg-white/5 cursor-pointer transition-colors">
+                  {episodes.map((episode) => (
+                    <li key={episode.id}>
+                      <label className="flex cursor-pointer items-center gap-3 rounded p-2 transition-colors hover:bg-white/5">
                         <input
                           type="checkbox"
-                          checked={selectedEpisodes.has(ep.episode_number)}
-                          onChange={() => toggleEpisode(ep.episode_number)}
-                          className="w-4 h-4 rounded border-[oklch(0.2_0.005_250)] text-primary focus:ring-primary/50 bg-black/20"
+                          checked={selectedEpisodes.has(episode.episode_number)}
+                          onChange={() => toggleEpisode(episode.episode_number)}
+                          disabled={busy}
+                          className="h-4 w-4 rounded border border-[oklch(0.2_0.005_250)] bg-black/20 text-primary focus:ring-primary/50 disabled:cursor-wait disabled:opacity-50"
                         />
-                        <div className="text-[12px] font-medium text-foreground/90">
-                          {ep.episode_number}. {ep.name}
-                        </div>
+                        <span className="text-[12px] font-medium text-foreground/90">
+                          {episode.episode_number}.{" "}
+                          {episode.name || `Episode ${episode.episode_number}`}
+                        </span>
                       </label>
                     </li>
                   ))}
                 </ul>
+              ) : (
+                <div className="py-6 text-center text-[12px] text-muted-foreground">
+                  No episodes are available for this season.
+                </div>
               )}
             </div>
           </section>
 
           <aside className="space-y-4">
-            <div className="panel-aluminum rounded-md p-4 sticky top-16">
-              <h2 className="text-[13px] font-medium text-foreground mb-1">Download Selected</h2>
-              <p className="text-[11px] text-muted-foreground mb-4">
+            <div className="panel-aluminum sticky top-16 rounded-md p-4">
+              <h2 className="mb-1 text-[13px] font-medium text-foreground">Download selected</h2>
+              <p className="mb-4 text-[11px] text-muted-foreground">
                 {selectedEpisodes.size} episode{selectedEpisodes.size === 1 ? "" : "s"} selected
               </p>
 
-              {preparedData.length === 0 ? (
+              <div className="mb-4 rounded-md border border-[var(--aluminum-line)] bg-black/15 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="text-[11px] font-medium text-foreground/90">Folder downloads</h3>
+                  <span
+                    className={`text-[9px] font-medium uppercase tracking-wide ${
+                      folderCapability === "available" ? "text-primary" : "text-muted-foreground"
+                    }`}
+                  >
+                    {folderCapability === "checking"
+                      ? "Checking"
+                      : folderCapability === "available"
+                        ? "Available"
+                        : "Individual only"}
+                  </span>
+                </div>
+                <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">
+                  {folderCapability === "available"
+                    ? "Choose a root folder after preparing links. Leethe creates a season folder inside it."
+                    : folderCapability === "insecure"
+                      ? "Folder access requires HTTPS. Individual episode downloads still work."
+                      : folderCapability === "unsupported"
+                        ? "This browser does not offer folder access. Use the individual episode downloads."
+                        : "Checking whether this browser supports folder access..."}
+                </p>
+              </div>
+
+              {!preparedData.length ? (
                 <button
+                  type="button"
                   onClick={handlePrepare}
                   disabled={selectedEpisodes.size === 0 || isPreparing}
-                  className="w-full btn-aqua btn-aqua-interactive rounded-md py-2 text-[12px] font-medium disabled:opacity-50"
+                  className="btn-aqua btn-aqua-interactive w-full rounded-md py-2 text-[12px] font-medium disabled:opacity-50"
                 >
-                  {isPreparing ? "Preparing Links..." : "Prepare Links"}
+                  {isPreparing ? "Preparing links..." : "Prepare links"}
                 </button>
               ) : (
-                <div className="space-y-4 animate-fade-in">
+                <div className="animate-fade-in space-y-4">
                   <div className="grid grid-cols-2 gap-2">
                     <div>
-                      <label className="text-[10px] text-muted-foreground block mb-1">
-                        Preferred Quality
-                      </label>
+                      <div className="mb-1 text-[10px] text-muted-foreground">
+                        Preferred quality
+                      </div>
                       <SelectMenu
                         label=""
+                        ariaLabel="Preferred download quality"
                         value={preferredQuality}
                         onChange={setPreferredQuality}
-                        direction="down"
                         options={[
                           { value: "2160p", label: "4K" },
                           { value: "1080p", label: "1080p" },
@@ -366,97 +650,295 @@ function DownloadTvPage() {
                       />
                     </div>
                     <div>
-                      <label className="text-[10px] text-muted-foreground block mb-1">
-                        Preferred Audio
-                      </label>
+                      <div className="mb-1 text-[10px] text-muted-foreground">Preferred audio</div>
                       <SelectMenu
                         label=""
+                        ariaLabel="Preferred download audio"
                         value={preferredAudio}
                         onChange={setPreferredAudio}
-                        direction="down"
-                        options={availableAudios.map(a => ({ value: a, label: a }))}
+                        options={availableAudios.map((audio) => ({ value: audio, label: audio }))}
                       />
                     </div>
                   </div>
-                  
-                  {downloadLinks.length > 0 ? (
-                    <div className="flex gap-2">
-                      <button
-                        onClick={handleDownloadFolder}
-                        disabled={isDownloadingFolder}
-                        className="flex-1 btn-aqua btn-aqua-interactive rounded-md py-2 text-[12px] font-medium disabled:opacity-50"
-                        title="Download the selected episodes as an organized folder"
-                      >
-                        {isDownloadingFolder ? "Downloading..." : "Download as Folder"}
-                      </button>
+
+                  {downloadLinks.length ? (
+                    <div className="space-y-3">
+                      <div className="rounded-md border border-[var(--aluminum-line)] bg-black/15 p-3">
+                        <div className="flex items-center justify-between gap-2 text-[10px]">
+                          <span className="font-medium text-foreground/90">
+                            {downloadLinks.length} ready file
+                            {downloadLinks.length === 1 ? "" : "s"}
+                          </span>
+                          <span className="text-muted-foreground">
+                            {formatDownloadBytes(downloadSize)}
+                          </span>
+                        </div>
+                        {folderCapability === "available" ? (
+                          <div className="mt-3 space-y-2">
+                            {folderName ? (
+                              <div className="rounded border border-primary/25 bg-primary/5 px-2.5 py-2">
+                                <div className="text-[9px] uppercase tracking-wide text-primary/80">
+                                  Destination
+                                </div>
+                                <div className="mt-0.5 break-words text-[10px] font-medium text-foreground/90">
+                                  {folderName} / {seasonFolderName}
+                                </div>
+                              </div>
+                            ) : (
+                              <p className="text-[10px] leading-relaxed text-muted-foreground">
+                                Choose where the new {seasonFolderName} folder should be created.
+                              </p>
+                            )}
+                            <button
+                              type="button"
+                              onClick={chooseDownloadFolder}
+                              disabled={isDownloadingFolder}
+                              className="chip-pill chip-pill-interactive w-full rounded-md py-1.5 text-[11px] font-medium disabled:opacity-50"
+                            >
+                              {folderName ? "Change folder" : "Choose download folder"}
+                            </button>
+                            {folderName ? (
+                              <button
+                                type="button"
+                                onClick={() => handleDownloadFolder()}
+                                disabled={isDownloadingFolder}
+                                className="btn-aqua btn-aqua-interactive w-full rounded-md py-2 text-[12px] font-medium disabled:opacity-50"
+                              >
+                                {isDownloadingFolder
+                                  ? "Downloading queue..."
+                                  : `Download ${downloadLinks.length} to folder`}
+                              </button>
+                            ) : null}
+                            {isDownloadingFolder ? (
+                              <button
+                                type="button"
+                                onClick={cancelFolderDownload}
+                                className="chip-pill chip-pill-interactive w-full rounded-md py-1.5 text-[11px] font-medium"
+                              >
+                                Cancel queue
+                              </button>
+                            ) : failedFolderDownloads.length ? (
+                              <button
+                                type="button"
+                                onClick={() => handleDownloadFolder(true)}
+                                className="chip-pill chip-pill-interactive w-full rounded-md py-1.5 text-[11px] font-medium"
+                              >
+                                Retry {failedFolderDownloads.length} failed or cancelled
+                              </button>
+                            ) : null}
+                          </div>
+                        ) : (
+                          <p className="mt-2 text-[10px] leading-relaxed text-muted-foreground">
+                            Folder access is unavailable here. Download one episode per click below;
+                            your browser will handle each direct provider file separately.
+                          </p>
+                        )}
+                      </div>
+
+                      {nextManualDownload ? (
+                        <div>
+                          <a
+                            href={nextManualDownload.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            download={episodeDownloadFileName(
+                              title,
+                              nextManualDownload.season,
+                              nextManualDownload.episode,
+                              nextManualDownload.label,
+                              nextManualDownload.quality,
+                            )}
+                            onClick={() => {
+                              recordDirectDownload(nextManualDownload);
+                              setManualDownloadIndex((current) => current + 1);
+                            }}
+                            className="chip-pill chip-pill-interactive flex w-full items-center justify-center rounded-md py-2 text-[11px] font-medium"
+                          >
+                            Download next: {nextManualDownload.label}
+                          </a>
+                          <p className="mt-1 text-center text-[9px] text-muted-foreground">
+                            File {manualDownloadIndex + 1} of {downloadLinks.length}. One click
+                            avoids browser multi-download blocks.
+                          </p>
+                        </div>
+                      ) : downloadLinks.length ? (
+                        <p className="text-center text-[10px] text-muted-foreground">
+                          All direct download links were opened. Use an episode button below to
+                          retry a file.
+                        </p>
+                      ) : null}
                     </div>
                   ) : (
-                    <div className="bg-red-500/10 border border-red-500/20 text-red-400 text-[11px] p-3 rounded-md text-center">
-                      <p className="font-semibold mb-1">No direct downloads available.</p>
-                      <p className="text-muted-foreground">These episodes use chunked streaming (HLS/m3u8), which can be played in the browser but cannot be downloaded as a single MP4 file.</p>
+                    <div className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-center text-[11px]">
+                      No direct MP4 downloads are available for these episodes.
                     </div>
                   )}
 
                   <button
-                    onClick={() => setPreparedData([])}
-                    className="w-full chip-pill chip-pill-interactive rounded-md py-1.5 text-[11px] font-medium"
+                    type="button"
+                    onClick={() => {
+                      setPreparedData([]);
+                      setDownloadProgress({});
+                      setFolderError("");
+                      subjectIdRef.current = undefined;
+                    }}
+                    disabled={busy}
+                    className="chip-pill chip-pill-interactive w-full rounded-md py-1.5 text-[11px] font-medium disabled:cursor-wait disabled:opacity-50"
                   >
-                    Reset
+                    Clear prepared links
                   </button>
 
-                  <div className="mt-4 pt-4 border-t border-[var(--aluminum-line)]">
-                    <h3 className="text-[10px] text-muted-foreground uppercase tracking-wider mb-2">
-                      Ready Links ({downloadLinks.length})
-                    </h3>
-                    <ul className="space-y-1.5 overflow-y-auto max-h-[40vh] pr-2 scrollbar-thin">
-                      {downloadLinks.map((d: any, i: number) => (
-                        <li key={i}>
-                          <a 
-                            href={d.url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="flex items-center justify-between px-2 py-1.5 rounded bg-black/20 hover:bg-black/40 border border-[oklch(0.2_0.005_250)] transition-colors group"
-                          >
-                            <div className="flex flex-col">
-                              <span className="text-[11px] font-medium text-foreground/90">{d.label}</span>
-                              <span className="text-[9px] text-muted-foreground">{d.audioLabel}</span>
-                            </div>
-                            <div className="flex flex-col items-end">
-                              <span className="text-[10px] text-primary group-hover:text-aqua transition-colors">{d.quality}</span>
-                              {d.size && <span className="text-[9px] text-muted-foreground">{(d.size / (1024 * 1024)).toFixed(1)} MB</span>}
-                            </div>
-                          </a>
-                          {downloadProgress[d.url] ? (
-                            <div className="mt-1">
-                              <div className="flex justify-between text-[8px] text-muted-foreground mb-0.5">
-                                <span>
-                                  {downloadProgress[d.url].status === 'error' ? downloadProgress[d.url].error :
-                                   downloadProgress[d.url].status === 'completed' ? 'Done' :
-                                   downloadProgress[d.url].status === 'downloading' ? `${(downloadProgress[d.url].bytes / (1024 * 1024)).toFixed(1)} MB` : 'Pending...'}
+                  <div className="border-t border-[var(--aluminum-line)] pt-4">
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <h3 className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                        Ready links ({downloadLinks.length})
+                      </h3>
+                      {Object.keys(downloadProgress).length ? (
+                        <span aria-live="polite" className="text-[9px] text-muted-foreground">
+                          {queueSummary.completed} done · {queueSummary.error} failed ·{" "}
+                          {queueSummary.cancelled} cancelled
+                        </span>
+                      ) : null}
+                    </div>
+                    <ul className="max-h-[40vh] space-y-1.5 overflow-y-auto pr-2">
+                      {downloadLinks.map((download) => {
+                        const progress = downloadProgress[download.key];
+                        const percent =
+                          progress?.status === "completed"
+                            ? 100
+                            : progress?.total
+                              ? Math.min(100, (progress.bytes / progress.total) * 100)
+                              : 0;
+                        return (
+                          <li key={download.key}>
+                            <a
+                              href={download.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              download={episodeDownloadFileName(
+                                title,
+                                download.season,
+                                download.episode,
+                                download.label,
+                                download.quality,
+                              )}
+                              onClick={() => recordDirectDownload(download)}
+                              className="group flex items-center justify-between rounded border border-[oklch(0.2_0.005_250)] bg-black/20 px-2 py-1.5 transition-colors hover:bg-black/40"
+                            >
+                              <span className="flex flex-col">
+                                <span className="text-[11px] font-medium text-foreground/90">
+                                  {download.label}
                                 </span>
-                                <span>
-                                  {downloadProgress[d.url].total ? `${Math.round((downloadProgress[d.url].bytes / downloadProgress[d.url].total) * 100)}%` : ''}
+                                <span className="text-[9px] text-muted-foreground">
+                                  {download.audioLabel}
                                 </span>
+                              </span>
+                              <span className="flex flex-col items-end">
+                                <span className="text-[10px] font-medium text-primary">
+                                  Download
+                                </span>
+                                <span className="text-[9px] text-muted-foreground">
+                                  {download.quality}
+                                </span>
+                                {download.size ? (
+                                  <span className="text-[9px] text-muted-foreground">
+                                    {formatDownloadBytes(download.size)}
+                                  </span>
+                                ) : null}
+                              </span>
+                            </a>
+                            {progress ? (
+                              <div className="mt-1">
+                                <div className="mb-0.5 flex justify-between text-[8px] text-muted-foreground">
+                                  <span>
+                                    {progress.status === "error"
+                                      ? progress.error
+                                      : progress.status === "cancelled"
+                                        ? "Cancelled"
+                                        : progress.status === "completed"
+                                          ? "Done"
+                                          : progress.status === "downloading"
+                                            ? `${(progress.bytes / (1024 * 1024)).toFixed(1)} MB`
+                                            : "Pending..."}
+                                  </span>
+                                  <span>{progress.total ? `${Math.round(percent)}%` : ""}</span>
+                                </div>
+                                <div className="h-1 w-full overflow-hidden rounded-full bg-black/40">
+                                  <div
+                                    className={`h-full transition-all duration-300 ${
+                                      progress.status === "error"
+                                        ? "bg-destructive"
+                                        : progress.status === "cancelled"
+                                          ? "bg-muted-foreground"
+                                          : progress.status === "completed"
+                                            ? "bg-[oklch(0.65_0.14_145)]"
+                                            : "bg-primary"
+                                    }`}
+                                    style={{ width: `${percent}%` }}
+                                  />
+                                </div>
                               </div>
-                              <div className="w-full bg-black/40 rounded-full h-1 overflow-hidden">
-                                <div 
-                                  className={`h-full ${downloadProgress[d.url].status === 'error' ? 'bg-red-500' : downloadProgress[d.url].status === 'completed' ? 'bg-green-500' : 'bg-primary'} transition-all duration-300`}
-                                  style={{ width: `${downloadProgress[d.url].total ? (downloadProgress[d.url].bytes / downloadProgress[d.url].total) * 100 : 0}%` }}
-                                />
-                              </div>
-                            </div>
-                          ) : null}
-                        </li>
-                      ))}
-                      {preparedData.length > downloadLinks.length && (
-                        <li className="px-2 py-1 text-[10px] text-red-400">
-                          {preparedData.length - downloadLinks.length} episodes unavailable
-                        </li>
-                      )}
+                            ) : null}
+                          </li>
+                        );
+                      })}
                     </ul>
                   </div>
+
+                  {unavailableDownloads.length ? (
+                    <div className="border-t border-[var(--aluminum-line)] pt-4">
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <h3 className="text-[10px] uppercase tracking-wider text-destructive">
+                          Unavailable ({unavailableDownloads.length})
+                        </h3>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            prepareEpisodes(
+                              unavailableDownloads.map((download) => download.episode),
+                              false,
+                            )
+                          }
+                          disabled={isPreparing}
+                          className="text-[10px] text-primary hover:text-primary/80 disabled:opacity-50"
+                        >
+                          {isPreparing ? "Retrying..." : "Retry unavailable"}
+                        </button>
+                      </div>
+                      <ul className="max-h-32 space-y-1 overflow-y-auto text-[9px] text-muted-foreground">
+                        {unavailableDownloads.map((download) => (
+                          <li
+                            key={`${download.season}:${download.episode}`}
+                            className="rounded border border-destructive/20 bg-destructive/5 px-2 py-1.5"
+                          >
+                            <span className="font-medium text-foreground/80">{download.label}</span>
+                            <span className="ml-1">
+                              · {download.error || "No direct MP4 source"}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
                 </div>
               )}
+
+              {preparationError ? (
+                <div
+                  role="alert"
+                  className="mt-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[11px]"
+                >
+                  {preparationError}
+                </div>
+              ) : null}
+              {folderError ? (
+                <div
+                  role="alert"
+                  className="mt-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[11px]"
+                >
+                  {folderError}
+                </div>
+              ) : null}
             </div>
           </aside>
         </div>

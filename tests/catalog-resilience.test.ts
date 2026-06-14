@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const testState = vi.hoisted(() => ({
   mode: "database-down" as "database-down" | "stale-discover" | "stale-detail" | "detail-write",
   detailWriteFinished: false,
+  detailReadCount: 0,
+  pageReadCount: 0,
 }));
 const tmdbRequest = vi.hoisted(() => vi.fn());
 
@@ -25,10 +27,33 @@ vi.mock("@neondatabase/serverless", () => ({
   neon: () => {
     const query = async (text: string, params: unknown[] = []) => {
       if (testState.mode === "database-down") throw new Error("Database unavailable");
-      if (text.includes("FROM schema_migrations")) return [{ count: 5 }];
+      if (text.includes("FROM schema_migrations")) return [{ count: 6 }];
 
       if (text.includes("FROM catalog_pages")) {
-        return params[2] === true ? [{ title_tmdb_ids: [1], total_pages: 1 }] : [];
+        testState.pageReadCount += 1;
+        if (testState.mode !== "stale-discover") return [];
+        if (text.includes("JOIN media_titles")) {
+          return [
+            {
+              media_type: "movie",
+              tmdb_id: 1,
+              title: "Cached Movie",
+              overview: "Available during an upstream outage.",
+              vote_average: 8,
+              genre_ids: [],
+              raw: {},
+              total_pages: 1,
+              page_synced_at: "2020-01-01T00:00:00.000Z",
+            },
+          ];
+        }
+        return [
+          {
+            title_tmdb_ids: [1],
+            total_pages: 1,
+            synced_at: "2020-01-01T00:00:00.000Z",
+          },
+        ];
       }
 
       if (text.includes("FROM unnest") && text.includes("JOIN media_titles")) {
@@ -45,8 +70,9 @@ vi.mock("@neondatabase/serverless", () => ({
         ];
       }
 
-      if (text.includes("SELECT *") && text.includes("detail_raw IS NOT NULL")) {
-        if (testState.mode !== "stale-detail" || params[2] !== true) return [];
+      if (text.includes("detail_raw IS NOT NULL")) {
+        testState.detailReadCount += 1;
+        if (testState.mode !== "stale-detail") return [];
         return [
           {
             media_type: "movie",
@@ -56,6 +82,7 @@ vi.mock("@neondatabase/serverless", () => ({
             vote_average: 8,
             raw: {},
             detail_raw: { id: 1, title: "Cached Detail", overview: "Stale detail." },
+            detail_synced_at: "2020-01-01T00:00:00.000Z",
           },
         ];
       }
@@ -75,12 +102,20 @@ vi.mock("@neondatabase/serverless", () => ({
   },
 }));
 
-import { discoverWithDatabase, fetchDetailWithDatabase } from "../src/lib/catalog-db.server";
+import {
+  discoverWithDatabase,
+  fetchDetailWithDatabase,
+  clearCatalogMemoryCachesForTests,
+  searchTitlesWithDatabase,
+} from "../src/lib/catalog-db.server";
 
 describe("catalog outage resilience", () => {
   beforeEach(() => {
     testState.mode = "database-down";
     testState.detailWriteFinished = false;
+    testState.detailReadCount = 0;
+    testState.pageReadCount = 0;
+    clearCatalogMemoryCachesForTests();
     tmdbRequest.mockReset();
   });
 
@@ -96,6 +131,13 @@ describe("catalog outage resilience", () => {
     expect(result.results[0]?.title).toBe("Live Movie");
   });
 
+  it("does not run broad one-character catalog searches", async () => {
+    const result = await searchTitlesWithDatabase("movie", "a");
+
+    expect(result.results).toEqual([]);
+    expect(tmdbRequest).not.toHaveBeenCalled();
+  });
+
   it("serves stale database pages when TMDB is unavailable", async () => {
     testState.mode = "stale-discover";
     tmdbRequest.mockRejectedValue(new Error("TMDB unavailable"));
@@ -103,6 +145,10 @@ describe("catalog outage resilience", () => {
     const result = await discoverWithDatabase("movie");
 
     expect(result.results[0]?.title).toBe("Cached Movie");
+    expect(testState.pageReadCount).toBe(1);
+
+    await discoverWithDatabase("movie");
+    expect(testState.pageReadCount).toBe(1);
   });
 
   it("serves stale title details when TMDB is unavailable", async () => {
@@ -112,6 +158,7 @@ describe("catalog outage resilience", () => {
     const result = await fetchDetailWithDatabase("movie", 1);
 
     expect(result.title).toBe("Cached Detail");
+    expect(testState.detailReadCount).toBe(1);
   });
 
   it("waits for durable detail persistence before returning", async () => {

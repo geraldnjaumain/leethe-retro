@@ -1,12 +1,24 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useMemo, useState, type FormEvent, type ReactNode } from "react";
-import { LogoDot } from "@/components/leethe/Nav";
+import { useMemo, useState, type FormEvent } from "react";
+import {
+  AdminTabNav,
+  AudienceView,
+  CatalogView,
+  CommandCenterView,
+  MobileAdminTabs,
+  ReliabilityView,
+  SupportSummary,
+  ViewHeading,
+} from "@/components/leethe/AdminDashboardViews";
 import { SelectMenu } from "@/components/leethe/SelectMenu";
+import { BrandMark } from "@/components/leethe/VisualAssets";
+import { buildOperationalAlerts, type AdminTab } from "@/lib/admin-insights";
 import {
   getAdminDashboard,
   updateSupportTicketStatus,
+  updateSupportTicketsStatus,
   type AdminDashboard,
-  type ProductEventName,
+  type SupportCategory,
   type TicketStatus,
 } from "@/lib/product";
 
@@ -15,31 +27,58 @@ export const Route = createFileRoute("/admin")({
   component: AdminPage,
 });
 
-function storedPassword() {
-  if (typeof window === "undefined") return "";
-  try {
-    return window.sessionStorage.getItem("leethe:admin-password") ?? "";
-  } catch {
-    return "";
-  }
-}
-
 function AdminPage() {
-  const [password, setPassword] = useState(storedPassword);
+  const [password, setPassword] = useState("");
   const [data, setData] = useState<AdminDashboard | null>(null);
+  const [activeTab, setActiveTab] = useState<AdminTab>("command");
+  const [refreshedAt, setRefreshedAt] = useState(new Date());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [ticketSearch, setTicketSearch] = useState("");
+  const [ticketStatus, setTicketStatus] = useState<"all" | TicketStatus>("all");
+  const [ticketCategory, setTicketCategory] = useState<"all" | SupportCategory>("all");
+  const [selectedTicketIds, setSelectedTicketIds] = useState<Set<string>>(new Set());
+  const [bulkUpdating, setBulkUpdating] = useState(false);
+  const [ticketOffset, setTicketOffset] = useState(0);
 
-  const load = async (event?: FormEvent) => {
+  const filteredTickets = useMemo(() => {
+    if (!data) return [];
+    const query = ticketSearch.trim().toLocaleLowerCase();
+    return data.tickets.filter((ticket) => {
+      if (ticketStatus !== "all" && ticket.status !== ticketStatus) return false;
+      if (ticketCategory !== "all" && ticket.category !== ticketCategory) return false;
+      if (!query) return true;
+      return [
+        ticket.id,
+        ticket.message,
+        ticket.email ?? "",
+        ticket.path ?? "",
+        ticket.mediaType ?? "",
+        ticket.tmdbId ?? "",
+      ]
+        .join(" ")
+        .toLocaleLowerCase()
+        .includes(query);
+    });
+  }, [data, ticketCategory, ticketSearch, ticketStatus]);
+  const allFilteredTicketsSelected =
+    filteredTickets.length > 0 &&
+    filteredTickets.every((ticket) => selectedTicketIds.has(ticket.id));
+  const alerts = useMemo(() => (data ? buildOperationalAlerts(data) : []), [data]);
+
+  const load = async (event?: FormEvent, nextTicketOffset = ticketOffset) => {
     event?.preventDefault();
     setLoading(true);
     setError("");
     try {
-      const next = await getAdminDashboard({ data: { password } });
+      const next = await getAdminDashboard({ data: { password, ticketOffset: nextTicketOffset } });
       setData(next);
-      window.sessionStorage.setItem("leethe:admin-password", password);
+      setSelectedTicketIds(new Set());
+      setTicketOffset(nextTicketOffset);
+      setRefreshedAt(new Date());
     } catch (loadError) {
-      setData(null);
+      if (!data) setData(null);
       setError(loadError instanceof Error ? loadError.message : "Dashboard unavailable.");
     } finally {
       setLoading(false);
@@ -62,67 +101,104 @@ function AdminPage() {
     }
   };
 
+  const toggleTicket = (id: string) => {
+    setSelectedTicketIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleFilteredTickets = () => {
+    const ids = filteredTickets.map((ticket) => ticket.id);
+    setSelectedTicketIds((current) => {
+      const allSelected = ids.length > 0 && ids.every((id) => current.has(id));
+      const next = new Set(current);
+      ids.forEach((id) => (allSelected ? next.delete(id) : next.add(id)));
+      return next;
+    });
+  };
+
+  const bulkUpdateTickets = async (status: TicketStatus) => {
+    const ids = Array.from(selectedTicketIds);
+    if (!data || !ids.length) return;
+    setBulkUpdating(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await updateSupportTicketsStatus({ data: { password, ids, status } });
+      setNotice(
+        `${result.updated} ticket${result.updated === 1 ? "" : "s"} marked ${status.replace("_", " ")}.`,
+      );
+      await load();
+    } catch (updateError) {
+      setError(updateError instanceof Error ? updateError.message : "Bulk ticket update failed.");
+    } finally {
+      setBulkUpdating(false);
+    }
+  };
+
   if (!data) {
     return (
-      <main className="grid min-h-screen place-items-center px-4">
-        <form onSubmit={load} className="panel-aluminum w-full max-w-sm rounded-md p-5">
-          <div className="flex items-center gap-2 border-b border-[var(--aluminum-line)] pb-3">
-            <LogoDot />
-            <div>
-              <h1 className="text-[14px] font-semibold text-foreground">Leethe operations</h1>
-              <p className="text-[10px] text-muted-foreground">Authorized administrators only</p>
-            </div>
-          </div>
-          <label className="mt-4 block">
-            <span className="text-[11px] text-muted-foreground">Admin password</span>
-            <input
-              autoFocus
-              type="password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              className="support-field mt-1"
-            />
-          </label>
-          {error ? <p className="mt-3 text-[11px] text-destructive">{error}</p> : null}
-          <div className="mt-4 flex items-center justify-between">
-            <Link to="/" className="text-[10px] text-muted-foreground hover:text-foreground">
-              Back to catalog
-            </Link>
-            <button
-              type="submit"
-              disabled={loading}
-              className="btn-aqua btn-aqua-interactive rounded-full px-4 py-1.5 text-[11px] font-medium disabled:opacity-60"
-            >
-              {loading ? "Loading..." : "Open dashboard"}
-            </button>
-          </div>
-        </form>
-      </main>
+      <AdminLogin
+        password={password}
+        loading={loading}
+        error={error}
+        onChange={setPassword}
+        onSubmit={load}
+      />
     );
   }
 
   const logout = () => {
-    window.sessionStorage.removeItem("leethe:admin-password");
     setPassword("");
     setData(null);
+    setTicketOffset(0);
+    setActiveTab("command");
+  };
+
+  const exportTickets = () => {
+    const rows = [
+      ["Ticket", "Category", "Status", "Email", "Report", "Path", "Media", "Updated"],
+      ...filteredTickets.map((ticket) => [
+        ticket.id,
+        ticket.category,
+        ticket.status,
+        ticket.email ?? "",
+        ticket.message,
+        ticket.path ?? "",
+        ticket.mediaType && ticket.tmdbId
+          ? `${ticket.mediaType}:${ticket.tmdbId}:${ticket.season ?? ""}:${ticket.episode ?? ""}`
+          : "",
+        ticket.updatedAt,
+      ]),
+    ];
+    downloadCsv("leethe-support-tickets.csv", rows);
   };
 
   return (
     <div className="min-h-screen bg-[oklch(0.12_0.005_250)]">
       <header className="nav-aluminum brushed sticky top-0 z-50">
-        <div className="mx-auto flex h-12 max-w-[1560px] items-center justify-between px-3 sm:px-4">
+        <div className="mx-auto flex h-12 max-w-[1680px] items-center justify-between px-3 sm:px-4">
           <div className="flex items-center gap-2">
-            <LogoDot />
+            <BrandMark />
             <span className="text-[13px] font-semibold">Leethe operations</span>
+            <span className="hidden rounded-full border border-primary/25 bg-primary/10 px-2 py-0.5 text-[8px] uppercase tracking-wide text-primary sm:inline">
+              Production
+            </span>
           </div>
           <div className="flex items-center gap-2">
             <button
+              type="button"
               onClick={() => load()}
-              className="chip-pill chip-pill-interactive rounded-full px-3 py-1 text-[10px]"
+              disabled={loading}
+              className="chip-pill chip-pill-interactive rounded-full px-3 py-1 text-[10px] disabled:opacity-50"
             >
-              {loading ? "Refreshing..." : "Refresh"}
+              {loading ? "Refreshing..." : "Refresh data"}
             </button>
             <button
+              type="button"
               onClick={logout}
               className="chip-pill chip-pill-interactive rounded-full px-3 py-1 text-[10px]"
             >
@@ -132,461 +208,431 @@ function AdminPage() {
         </div>
       </header>
 
-      <div className="mx-auto grid max-w-[1560px] gap-4 px-3 py-4 sm:px-4 xl:grid-cols-[190px_minmax(0,1fr)]">
-        <aside className="panel-aluminum hidden rounded-md p-2 xl:block">
-          <nav className="space-y-1 text-[11px]">
-            <AdminNav href="#overview">Overview</AdminNav>
-            <AdminNav href="#traffic">Traffic</AdminNav>
-            <AdminNav href="#system">System</AdminNav>
-            <AdminNav href="#support">Support</AdminNav>
-          </nav>
-          <div className="mt-6 border-t border-[var(--aluminum-line)] px-2 pt-3 text-[9px] leading-relaxed text-muted-foreground">
-            Aggregate first-party operations data. No third-party analytics SDK is loaded.
+      <div className="mx-auto grid max-w-[1680px] gap-4 px-3 py-4 sm:px-4 xl:grid-cols-[230px_minmax(0,1fr)]">
+        <aside className="panel-aluminum sticky top-16 hidden h-[calc(100vh-5rem)] rounded-md p-2 xl:flex xl:flex-col">
+          <AdminTabNav activeTab={activeTab} alerts={alerts} onChange={setActiveTab} />
+          <div className="mt-auto border-t border-[var(--aluminum-line)] px-2 pt-3">
+            <div className="flex items-center justify-between text-[8px] text-muted-foreground">
+              <span>Catalog</span>
+              <span>{data.system.catalogTitles.toLocaleString()} titles</span>
+            </div>
+            <div className="mt-1 flex items-center justify-between text-[8px] text-muted-foreground">
+              <span>Open support</span>
+              <span>{data.totals.openTickets.toLocaleString()}</span>
+            </div>
+            <p className="mt-3 text-[8px] leading-relaxed text-muted-foreground">
+              First-party operational signals. Alerts are threshold-based and require operator
+              judgment.
+            </p>
           </div>
         </aside>
 
         <main className="min-w-0 space-y-4">
+          <MobileAdminTabs activeTab={activeTab} onChange={setActiveTab} />
+          <ViewHeading tab={activeTab} refreshedAt={refreshedAt} />
           {error ? (
-            <div className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-[11px]">
+            <div
+              role="alert"
+              className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-[11px]"
+            >
               {error}
             </div>
           ) : null}
-
-          <section id="overview" className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            <MetricCard
-              label="Page views"
-              current={data.totals.pageViews}
-              previous={data.previousTotals.pageViews}
-            />
-            <MetricCard
-              label="Playback starts"
-              current={data.totals.playbackStarts}
-              previous={data.previousTotals.playbackStarts}
-            />
-            <MetricCard
-              label="Downloads"
-              current={data.totals.downloads}
-              previous={data.previousTotals.downloads}
-            />
-            <MetricCard
-              label="Open support tickets"
-              current={data.totals.openTickets}
-              previous={data.previousTotals.openTickets}
-              invert
-            />
-          </section>
-
-          <section
-            id="traffic"
-            className="grid gap-4 xl:grid-cols-[minmax(0,1.5fr)_minmax(330px,0.7fr)]"
-          >
-            <DashboardPanel title="Traffic" subtitle="Last 14 days">
-              <TrafficChart data={data.daily} />
-            </DashboardPanel>
-            <DashboardPanel title="Activity by type" subtitle="Last 14 days">
-              <ActivityChart totals={data.eventTotals} />
-            </DashboardPanel>
-          </section>
-
-          <section id="system" className="panel-aluminum rounded-md p-3">
-            <div className="mb-3 flex items-center justify-between">
-              <h2 className="text-[11px] font-semibold uppercase tracking-wide text-foreground/80">
-                System status
-              </h2>
-              <span className="text-[9px] text-muted-foreground">
-                Configuration and dependencies
-              </span>
+          {notice ? (
+            <div
+              role="status"
+              className="rounded-md border border-primary/35 bg-primary/10 px-3 py-2 text-[11px]"
+            >
+              {notice}
             </div>
-            <div className="grid gap-2 sm:grid-cols-3">
-              <StatusItem label="Application" value="healthy" healthy />
-              <StatusItem label="Database" value={data.system.database} healthy />
-              <StatusItem
-                label="Product analytics"
-                value={data.system.analytics}
-                healthy={data.system.analytics === "enabled"}
+          ) : null}
+
+          {activeTab === "command" ? (
+            <CommandCenterView data={data} alerts={alerts} onNavigate={setActiveTab} />
+          ) : null}
+          {activeTab === "audience" ? <AudienceView data={data} /> : null}
+          {activeTab === "reliability" ? (
+            <ReliabilityView data={data} alerts={alerts} onNavigate={setActiveTab} />
+          ) : null}
+          {activeTab === "support" ? (
+            <div className="space-y-4" role="tabpanel">
+              <SupportSummary data={data} />
+              <SupportTickets
+                data={data}
+                filteredTickets={filteredTickets}
+                selectedTicketIds={selectedTicketIds}
+                allFilteredTicketsSelected={allFilteredTicketsSelected}
+                bulkUpdating={bulkUpdating}
+                loading={loading}
+                ticketSearch={ticketSearch}
+                ticketStatus={ticketStatus}
+                ticketCategory={ticketCategory}
+                ticketOffset={ticketOffset}
+                onSearchChange={setTicketSearch}
+                onStatusChange={setTicketStatus}
+                onCategoryChange={setTicketCategory}
+                onToggleTicket={toggleTicket}
+                onToggleFilteredTickets={toggleFilteredTickets}
+                onClearSelection={() => setSelectedTicketIds(new Set())}
+                onBulkUpdate={bulkUpdateTickets}
+                onUpdateTicket={updateTicket}
+                onExport={exportTickets}
+                onPageChange={(offset) => load(undefined, offset)}
               />
-              <StatusItem
-                label="Stream resolver"
-                value={data.system.streamResolver}
-                healthy={data.system.streamResolver === "enabled"}
-              />
-              <StatusItem label="Liveness endpoint" value="/healthz" healthy />
-              <StatusItem label="Readiness endpoint" value="/readyz?strict=1" healthy />
             </div>
-          </section>
-
-          <section id="support" className="panel-aluminum overflow-hidden rounded-md">
-            <div className="flex items-center justify-between border-b border-[var(--aluminum-line)] px-3 py-2.5">
-              <div>
-                <h2 className="text-[11px] font-semibold uppercase tracking-wide text-foreground/80">
-                  Recent support tickets
-                </h2>
-                <p className="text-[9px] text-muted-foreground">
-                  {data.tickets.length} most recent
-                </p>
-              </div>
-              <Link
-                to="/support"
-                className="chip-pill chip-pill-interactive rounded-full px-3 py-1 text-[10px]"
-              >
-                Public form
-              </Link>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[850px] border-collapse text-left text-[10px]">
-                <thead className="text-muted-foreground">
-                  <tr className="border-b border-[var(--aluminum-line)]">
-                    <th className="px-3 py-2 font-medium">Ticket</th>
-                    <th className="px-3 py-2 font-medium">Category</th>
-                    <th className="px-3 py-2 font-medium">Report</th>
-                    <th className="px-3 py-2 font-medium">Context</th>
-                    <th className="px-3 py-2 font-medium">Updated</th>
-                    <th className="px-3 py-2 font-medium">Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.tickets.map((ticket) => (
-                    <tr
-                      key={ticket.id}
-                      className="border-b border-[var(--aluminum-line)]/70 hover:bg-white/3"
-                    >
-                      <td className="whitespace-nowrap px-3 py-2 font-medium text-primary">
-                        {ticket.id}
-                      </td>
-                      <td className="px-3 py-2 capitalize text-foreground/80">{ticket.category}</td>
-                      <td className="max-w-[380px] px-3 py-2">
-                        <div className="line-clamp-2 text-foreground/85">{ticket.message}</div>
-                        {ticket.email ? (
-                          <div className="mt-0.5 text-[9px] text-muted-foreground">
-                            {ticket.email}
-                          </div>
-                        ) : null}
-                      </td>
-                      <td className="whitespace-nowrap px-3 py-2 text-muted-foreground">
-                        {ticket.mediaType && ticket.tmdbId
-                          ? `${ticket.mediaType} ${ticket.tmdbId}${ticket.season ? ` S${ticket.season}E${ticket.episode ?? 1}` : ""}`
-                          : ticket.path || "General"}
-                      </td>
-                      <td className="whitespace-nowrap px-3 py-2 text-muted-foreground">
-                        {new Date(ticket.updatedAt).toLocaleString()}
-                      </td>
-                      <td className="px-3 py-2">
-                        <SelectMenu
-                          label=""
-                          value={ticket.status}
-                          onChange={(value) => updateTicket(ticket.id, value as TicketStatus)}
-                          direction="down"
-                          options={[
-                            { value: "open", label: "Open" },
-                            { value: "in_progress", label: "In progress" },
-                            { value: "resolved", label: "Resolved" },
-                          ]}
-                        />
-                      </td>
-                    </tr>
-                  ))}
-                  {data.tickets.length === 0 ? (
-                    <tr>
-                      <td colSpan={6} className="px-3 py-8 text-center text-muted-foreground">
-                        No support tickets yet.
-                      </td>
-                    </tr>
-                  ) : null}
-                </tbody>
-              </table>
-            </div>
-          </section>
-
-          <section id="actions" className="panel-aluminum rounded-md p-3">
-            <div className="mb-3 border-b border-[var(--aluminum-line)] pb-2">
-              <h2 className="text-[11px] font-semibold uppercase tracking-wide text-foreground/80">
-                System actions
-              </h2>
-              <span className="text-[9px] text-muted-foreground">
-                Manage cache and platform state
-              </span>
-            </div>
-            <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-4">
-              <div className="rounded border border-[oklch(0.2_0.005_250)] bg-black/10 p-3">
-                <div className="mb-2 text-[11px] font-medium text-foreground">API Cache</div>
-                <div className="mb-3 text-[9px] text-muted-foreground leading-tight">
-                  Clear cached TMDB API responses and provider streams.
-                </div>
-                <button
-                  type="button"
-                  onClick={() => alert("Cache cleared successfully.")}
-                  className="btn-aqua btn-aqua-interactive w-full rounded-md py-1.5 text-[10px] font-medium"
-                >
-                  Clear cache
-                </button>
-              </div>
-              <div className="rounded border border-[oklch(0.2_0.005_250)] bg-black/10 p-3">
-                <div className="mb-2 text-[11px] font-medium text-foreground">Search Index</div>
-                <div className="mb-3 text-[9px] text-muted-foreground leading-tight">
-                  Rebuild search indexes for the autocomplete API.
-                </div>
-                <button
-                  type="button"
-                  onClick={() => alert("Search index rebuild started.")}
-                  className="chip-pill chip-pill-interactive w-full rounded-md py-1.5 text-[10px] font-medium"
-                >
-                  Rebuild index
-                </button>
-              </div>
-              <div className="rounded border border-[oklch(0.2_0.005_250)] bg-black/10 p-3">
-                <div className="mb-2 text-[11px] font-medium text-foreground">Rate Limits</div>
-                <div className="mb-3 text-[9px] text-muted-foreground leading-tight">
-                  Reset IP-based rate limiting buckets across all endpoints.
-                </div>
-                <button
-                  type="button"
-                  onClick={() => alert("Rate limits reset.")}
-                  className="chip-pill chip-pill-interactive w-full rounded-md py-1.5 text-[10px] font-medium text-destructive hover:text-destructive"
-                >
-                  Reset limits
-                </button>
-              </div>
-            </div>
-          </section>
-
-          <section id="popularity" className="panel-aluminum rounded-md p-3">
-            <div className="mb-3 border-b border-[var(--aluminum-line)] pb-2 flex items-center justify-between">
-              <div>
-                <h2 className="text-[11px] font-semibold uppercase tracking-wide text-foreground/80">
-                  Popular Content
-                </h2>
-                <span className="text-[9px] text-muted-foreground">
-                  Trending titles across the platform (Live)
-                </span>
-              </div>
-              <span className="relative flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
-              </span>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-[10px]">
-                <thead className="text-muted-foreground border-b border-[var(--aluminum-line)]">
-                  <tr>
-                    <th className="px-2 py-1.5 font-medium">Rank</th>
-                    <th className="px-2 py-1.5 font-medium">Title</th>
-                    <th className="px-2 py-1.5 font-medium">Type</th>
-                    <th className="px-2 py-1.5 font-medium text-right">Popularity Score</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[var(--aluminum-line)]/50">
-                  {data.popularTitles.map((title) => (
-                    <tr key={title.title} className="hover:bg-white/5">
-                      <td className="px-2 py-2 font-medium text-primary">#{title.rank}</td>
-                      <td className="px-2 py-2 text-foreground/90 font-medium">{title.title}</td>
-                      <td className="px-2 py-2 text-muted-foreground capitalize">
-                        {title.mediaType === "tv" ? "TV Series" : "Movie"}
-                      </td>
-                      <td className="px-2 py-2 text-right text-foreground">
-                        {Math.round(title.popularity).toLocaleString()}
-                      </td>
-                    </tr>
-                  ))}
-                  {data.popularTitles.length === 0 && (
-                    <tr>
-                      <td colSpan={4} className="px-2 py-6 text-center text-muted-foreground">
-                        No popularity data available yet.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </section>
+          ) : null}
+          {activeTab === "catalog" ? <CatalogView data={data} /> : null}
         </main>
       </div>
     </div>
   );
 }
 
-function AdminNav({ href, children }: { href: string; children: ReactNode }) {
-  return (
-    <a
-      href={href}
-      className="block rounded-[5px] border border-transparent px-2.5 py-2 text-muted-foreground hover:border-[var(--aluminum-line)] hover:bg-white/5 hover:text-foreground"
-    >
-      {children}
-    </a>
-  );
-}
-
-function MetricCard({
-  label,
-  current,
-  previous,
-  invert = false,
+function AdminLogin({
+  password,
+  loading,
+  error,
+  onChange,
+  onSubmit,
 }: {
-  label: string;
-  current: number;
-  previous: number;
-  invert?: boolean;
-}) {
-  const delta = previous ? ((current - previous) / previous) * 100 : current ? 100 : 0;
-  const healthy = invert ? delta <= 0 : delta >= 0;
-  return (
-    <article className="panel-aluminum rounded-md p-3">
-      <div className="text-[9px] font-medium uppercase tracking-wide text-muted-foreground">
-        {label}
-      </div>
-      <div className="mt-2 flex items-end justify-between gap-3">
-        <div className="text-[24px] font-light tracking-tight text-foreground">
-          {current.toLocaleString()}
-        </div>
-        <MiniSpark positive={healthy} />
-      </div>
-      <div
-        className={`mt-2 text-[9px] ${healthy ? "text-[oklch(0.75_0.16_145)]" : "text-[oklch(0.72_0.16_45)]"}`}
-      >
-        {delta >= 0 ? "+" : ""}
-        {delta.toFixed(1)}% vs previous period
-      </div>
-    </article>
-  );
-}
-
-function MiniSpark({ positive }: { positive: boolean }) {
-  return (
-    <svg
-      viewBox="0 0 88 28"
-      className={positive ? "h-7 w-20 text-primary" : "h-7 w-20 text-[oklch(0.72_0.16_45)]"}
-    >
-      <polyline
-        points="1,23 9,16 17,19 25,8 33,14 41,12 49,21 57,17 65,18 73,7 87,12"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-      />
-    </svg>
-  );
-}
-
-function DashboardPanel({
-  title,
-  subtitle,
-  children,
-}: {
-  title: string;
-  subtitle: string;
-  children: ReactNode;
+  password: string;
+  loading: boolean;
+  error: string;
+  onChange: (value: string) => void;
+  onSubmit: (event: FormEvent) => void;
 }) {
   return (
-    <article className="panel-aluminum min-w-0 rounded-md p-3">
-      <div className="mb-3 flex items-baseline justify-between border-b border-[var(--aluminum-line)] pb-2">
-        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-foreground/80">
-          {title}
-        </h2>
-        <span className="text-[9px] text-muted-foreground">{subtitle}</span>
-      </div>
-      {children}
-    </article>
-  );
-}
-
-function TrafficChart({ data }: { data: AdminDashboard["daily"] }) {
-  const points = useMemo(() => {
-    const max = Math.max(1, ...data.map((item) => item.pageViews));
-    return data.map((item, index) => ({
-      ...item,
-      x: data.length === 1 ? 0 : (index / (data.length - 1)) * 100,
-      y: 86 - (item.pageViews / max) * 70,
-    }));
-  }, [data]);
-  const line = points.map((point) => `${point.x},${point.y}`).join(" ");
-  const area = `0,90 ${line} 100,90`;
-
-  return (
-    <div>
-      <svg
-        viewBox="0 0 100 100"
-        preserveAspectRatio="none"
-        className="h-64 w-full overflow-visible"
-      >
-        {[20, 40, 60, 80].map((y) => (
-          <line
-            key={y}
-            x1="0"
-            y1={y}
-            x2="100"
-            y2={y}
-            stroke="oklch(0.55 0.01 250 / 0.15)"
-            strokeWidth="0.35"
-          />
-        ))}
-        <polygon points={area} fill="oklch(0.58 0.16 240 / 0.16)" />
-        <polyline
-          points={line}
-          fill="none"
-          stroke="oklch(0.72 0.16 235)"
-          strokeWidth="0.8"
-          vectorEffect="non-scaling-stroke"
-        />
-        {points.map((point) => (
-          <circle key={point.date} cx={point.x} cy={point.y} r="1.15" fill="oklch(0.78 0.16 235)" />
-        ))}
-      </svg>
-      <div className="mt-2 grid grid-cols-7 gap-1 text-[8px] text-muted-foreground">
-        {data
-          .filter((_, index) => index % 2 === 0)
-          .map((item) => (
-            <span key={item.date}>
-              {new Date(`${item.date}T00:00:00Z`).toLocaleDateString(undefined, {
-                month: "short",
-                day: "numeric",
-              })}
-            </span>
-          ))}
-      </div>
-    </div>
-  );
-}
-
-const eventLabels: Record<ProductEventName, string> = {
-  page_view: "Page views",
-  playback_start: "Playback",
-  playback_error: "Errors",
-  download: "Downloads",
-  support_submitted: "Support",
-};
-
-function ActivityChart({ totals }: { totals: AdminDashboard["eventTotals"] }) {
-  const max = Math.max(1, ...totals.map((item) => item.count));
-  return (
-    <div className="space-y-3 py-1">
-      {totals.map((item) => (
-        <div key={item.name}>
-          <div className="mb-1 flex items-center justify-between text-[9px]">
-            <span className="text-muted-foreground">{eventLabels[item.name]}</span>
-            <span className="font-medium text-foreground/85">{item.count.toLocaleString()}</span>
+    <main className="grid min-h-screen place-items-center px-4">
+      <form onSubmit={onSubmit} className="panel-aluminum w-full max-w-sm rounded-md p-5">
+        <div className="flex items-center gap-2 border-b border-[var(--aluminum-line)] pb-3">
+          <BrandMark />
+          <div>
+            <h1 className="text-[14px] font-semibold text-foreground">Leethe operations</h1>
+            <p className="text-[10px] text-muted-foreground">Authorized administrators only</p>
           </div>
-          <div className="h-2 overflow-hidden rounded-full bg-black/35">
-            <div
-              className="h-full rounded-full bg-gradient-to-r from-[oklch(0.48_0.16_245)] to-[oklch(0.74_0.16_235)]"
-              style={{ width: `${Math.max(2, (item.count / max) * 100)}%` }}
+        </div>
+        <label className="mt-4 block">
+          <span className="text-[11px] text-muted-foreground">Admin password</span>
+          <input
+            autoFocus
+            type="password"
+            autoComplete="current-password"
+            value={password}
+            onChange={(event) => onChange(event.target.value)}
+            className="support-field mt-1"
+          />
+        </label>
+        {error ? <p className="mt-3 text-[11px] text-destructive">{error}</p> : null}
+        <div className="mt-4 flex items-center justify-between">
+          <Link to="/" className="text-[10px] text-muted-foreground hover:text-foreground">
+            Back to catalog
+          </Link>
+          <button
+            type="submit"
+            disabled={loading}
+            className="btn-aqua btn-aqua-interactive rounded-full px-4 py-1.5 text-[11px] font-medium disabled:opacity-60"
+          >
+            {loading ? "Loading..." : "Open dashboard"}
+          </button>
+        </div>
+      </form>
+    </main>
+  );
+}
+
+type Ticket = AdminDashboard["tickets"][number];
+
+function SupportTickets({
+  data,
+  filteredTickets,
+  selectedTicketIds,
+  allFilteredTicketsSelected,
+  bulkUpdating,
+  loading,
+  ticketSearch,
+  ticketStatus,
+  ticketCategory,
+  ticketOffset,
+  onSearchChange,
+  onStatusChange,
+  onCategoryChange,
+  onToggleTicket,
+  onToggleFilteredTickets,
+  onClearSelection,
+  onBulkUpdate,
+  onUpdateTicket,
+  onExport,
+  onPageChange,
+}: {
+  data: AdminDashboard;
+  filteredTickets: Ticket[];
+  selectedTicketIds: Set<string>;
+  allFilteredTicketsSelected: boolean;
+  bulkUpdating: boolean;
+  loading: boolean;
+  ticketSearch: string;
+  ticketStatus: "all" | TicketStatus;
+  ticketCategory: "all" | SupportCategory;
+  ticketOffset: number;
+  onSearchChange: (value: string) => void;
+  onStatusChange: (value: "all" | TicketStatus) => void;
+  onCategoryChange: (value: "all" | SupportCategory) => void;
+  onToggleTicket: (id: string) => void;
+  onToggleFilteredTickets: () => void;
+  onClearSelection: () => void;
+  onBulkUpdate: (status: TicketStatus) => void;
+  onUpdateTicket: (id: string, status: TicketStatus) => void;
+  onExport: () => void;
+  onPageChange: (offset: number) => void;
+}) {
+  return (
+    <section className="panel-aluminum overflow-hidden rounded-md">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--aluminum-line)] px-3 py-2.5">
+        <div>
+          <h2 className="text-[11px] font-semibold uppercase tracking-wide text-foreground/80">
+            Ticket workspace
+          </h2>
+          <p className="text-[9px] text-muted-foreground">
+            {filteredTickets.length} shown · {data.tickets.length} loaded ·{" "}
+            {data.ticketTotal.toLocaleString()} total
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={onExport}
+            disabled={!filteredTickets.length}
+            className="chip-pill chip-pill-interactive rounded-full px-3 py-1 text-[10px] disabled:opacity-50"
+          >
+            Export CSV
+          </button>
+          <Link
+            to="/support"
+            className="chip-pill chip-pill-interactive rounded-full px-3 py-1 text-[10px]"
+          >
+            Public form
+          </Link>
+        </div>
+      </div>
+      <div className="grid gap-2 border-b border-[var(--aluminum-line)] bg-black/10 px-3 py-3 md:grid-cols-[minmax(180px,1fr)_180px_180px]">
+        <label>
+          <span className="sr-only">Search support tickets</span>
+          <input
+            type="search"
+            value={ticketSearch}
+            onChange={(event) => onSearchChange(event.target.value)}
+            placeholder="Search tickets, reports, paths..."
+            className="support-field py-2"
+          />
+        </label>
+        <SelectMenu
+          label="Status"
+          value={ticketStatus}
+          onChange={(value) => onStatusChange(value as "all" | TicketStatus)}
+          options={[
+            { value: "all", label: "All statuses" },
+            { value: "open", label: "Open" },
+            { value: "in_progress", label: "In progress" },
+            { value: "resolved", label: "Resolved" },
+          ]}
+        />
+        <SelectMenu
+          label="Category"
+          value={ticketCategory}
+          onChange={(value) => onCategoryChange(value as "all" | SupportCategory)}
+          options={[
+            { value: "all", label: "All categories" },
+            { value: "playback", label: "Playback" },
+            { value: "subtitles", label: "Subtitles" },
+            { value: "audio", label: "Audio" },
+            { value: "downloads", label: "Downloads" },
+            { value: "catalog", label: "Catalog" },
+            { value: "legal", label: "Legal" },
+            { value: "other", label: "Other" },
+          ]}
+        />
+      </div>
+      {selectedTicketIds.size ? (
+        <div className="flex flex-wrap items-center gap-2 border-b border-[var(--aluminum-line)] bg-primary/8 px-3 py-2">
+          <span className="mr-auto text-[10px] font-medium">
+            {selectedTicketIds.size} ticket{selectedTicketIds.size === 1 ? "" : "s"} selected
+          </span>
+          <BulkButton
+            label="Mark open"
+            disabled={bulkUpdating}
+            onClick={() => onBulkUpdate("open")}
+          />
+          <BulkButton
+            label="Mark in progress"
+            disabled={bulkUpdating}
+            onClick={() => onBulkUpdate("in_progress")}
+          />
+          <button
+            type="button"
+            onClick={() => onBulkUpdate("resolved")}
+            disabled={bulkUpdating}
+            className="btn-aqua btn-aqua-interactive rounded-full px-3 py-1 text-[10px] disabled:opacity-50"
+          >
+            {bulkUpdating ? "Updating..." : "Resolve selected"}
+          </button>
+          <BulkButton label="Clear" disabled={bulkUpdating} onClick={onClearSelection} />
+        </div>
+      ) : null}
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[900px] border-collapse text-left text-[10px]">
+          <thead className="text-muted-foreground">
+            <tr className="border-b border-[var(--aluminum-line)]">
+              <th className="w-10 px-3 py-2 font-medium">
+                <input
+                  type="checkbox"
+                  aria-label="Select all filtered tickets"
+                  checked={allFilteredTicketsSelected}
+                  onChange={onToggleFilteredTickets}
+                  disabled={!filteredTickets.length || bulkUpdating}
+                  className="h-3.5 w-3.5 rounded border border-[oklch(0.3_0.005_250)] bg-black/20 text-primary focus:ring-primary/50"
+                />
+              </th>
+              <th className="px-3 py-2 font-medium">Ticket</th>
+              <th className="px-3 py-2 font-medium">Category</th>
+              <th className="px-3 py-2 font-medium">Report</th>
+              <th className="px-3 py-2 font-medium">Context</th>
+              <th className="px-3 py-2 font-medium">Updated</th>
+              <th className="px-3 py-2 font-medium">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filteredTickets.map((ticket) => (
+              <TicketRow
+                key={ticket.id}
+                ticket={ticket}
+                selected={selectedTicketIds.has(ticket.id)}
+                disabled={bulkUpdating}
+                onToggle={onToggleTicket}
+                onUpdate={onUpdateTicket}
+              />
+            ))}
+            {!filteredTickets.length ? (
+              <tr>
+                <td colSpan={7} className="px-3 py-8 text-center text-muted-foreground">
+                  No support tickets match these filters.
+                </td>
+              </tr>
+            ) : null}
+          </tbody>
+        </table>
+      </div>
+      {data.ticketTotal > data.tickets.length ? (
+        <div className="flex items-center justify-between gap-3 border-t border-[var(--aluminum-line)] px-3 py-2 text-[10px] text-muted-foreground">
+          <span>
+            Tickets {ticketOffset + 1}-
+            {Math.min(ticketOffset + data.tickets.length, data.ticketTotal)} of{" "}
+            {data.ticketTotal.toLocaleString()}
+          </span>
+          <div className="flex gap-2">
+            <BulkButton
+              label="Previous"
+              disabled={loading || ticketOffset === 0}
+              onClick={() => onPageChange(Math.max(0, ticketOffset - 100))}
+            />
+            <BulkButton
+              label="Next"
+              disabled={loading || ticketOffset + data.tickets.length >= data.ticketTotal}
+              onClick={() => onPageChange(ticketOffset + 100)}
             />
           </div>
         </div>
-      ))}
-    </div>
+      ) : null}
+    </section>
   );
 }
 
-function StatusItem({ label, value, healthy }: { label: string; value: string; healthy: boolean }) {
+function TicketRow({
+  ticket,
+  selected,
+  disabled,
+  onToggle,
+  onUpdate,
+}: {
+  ticket: Ticket;
+  selected: boolean;
+  disabled: boolean;
+  onToggle: (id: string) => void;
+  onUpdate: (id: string, status: TicketStatus) => void;
+}) {
   return (
-    <div className="flex items-center gap-2 rounded-md border border-[var(--aluminum-line)] bg-black/15 px-3 py-2">
-      <span
-        className={`h-2 w-2 rounded-full ${healthy ? "bg-[oklch(0.72_0.18_145)]" : "bg-[oklch(0.72_0.16_55)]"}`}
-      />
-      <div className="min-w-0">
-        <div className="text-[9px] uppercase tracking-wide text-muted-foreground">{label}</div>
-        <div className="line-clamp-1 text-[10px] font-medium capitalize text-foreground/85">
-          {value}
-        </div>
-      </div>
-    </div>
+    <tr className="border-b border-[var(--aluminum-line)]/70 hover:bg-white/3">
+      <td className="px-3 py-2">
+        <input
+          type="checkbox"
+          aria-label={`Select ticket ${ticket.id}`}
+          checked={selected}
+          onChange={() => onToggle(ticket.id)}
+          disabled={disabled}
+          className="h-3.5 w-3.5 rounded border border-[oklch(0.3_0.005_250)] bg-black/20 text-primary focus:ring-primary/50"
+        />
+      </td>
+      <td className="whitespace-nowrap px-3 py-2 font-medium text-primary">{ticket.id}</td>
+      <td className="px-3 py-2 capitalize text-foreground/80">{ticket.category}</td>
+      <td className="max-w-[380px] px-3 py-2">
+        <div className="line-clamp-2 text-foreground/85">{ticket.message}</div>
+        {ticket.email ? (
+          <div className="mt-0.5 text-[9px] text-muted-foreground">{ticket.email}</div>
+        ) : null}
+      </td>
+      <td className="whitespace-nowrap px-3 py-2 text-muted-foreground">
+        {ticket.mediaType && ticket.tmdbId
+          ? `${ticket.mediaType} ${ticket.tmdbId}${ticket.season ? ` S${ticket.season}E${ticket.episode ?? 1}` : ""}`
+          : ticket.path || "General"}
+      </td>
+      <td className="whitespace-nowrap px-3 py-2 text-muted-foreground">
+        {new Date(ticket.updatedAt).toLocaleString()}
+      </td>
+      <td className="px-3 py-2">
+        <SelectMenu
+          label=""
+          ariaLabel={`Status for ticket ${ticket.id}`}
+          value={ticket.status}
+          onChange={(value) => onUpdate(ticket.id, value as TicketStatus)}
+          options={[
+            { value: "open", label: "Open" },
+            { value: "in_progress", label: "In progress" },
+            { value: "resolved", label: "Resolved" },
+          ]}
+        />
+      </td>
+    </tr>
   );
+}
+
+function BulkButton({
+  label,
+  disabled,
+  onClick,
+}: {
+  label: string;
+  disabled: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className="chip-pill chip-pill-interactive rounded-full px-3 py-1 text-[10px] disabled:opacity-40"
+    >
+      {label}
+    </button>
+  );
+}
+
+function downloadCsv(fileName: string, rows: Array<Array<string | number>>) {
+  const csv = rows
+    .map((row) => row.map((value) => `"${String(value).replaceAll('"', '""')}"`).join(","))
+    .join("\n");
+  const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }

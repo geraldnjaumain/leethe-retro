@@ -47,11 +47,24 @@ survives process restarts and upstream outages.
 During a Neon outage, normal readiness remains HTTP 200 so upstream TMDB traffic can still be
 served; operational checks use `/readyz?strict=1` to alert until Neon recovers.
 
-External playback is disabled in production unless both `ENABLE_EXTERNAL_STREAM_RESOLVER=true` and
+Catalog sharding is optional. Set comma-separated `CATALOG_DATABASE_SHARD_URLS` application-role
+connections and matching `CATALOG_DATABASE_SHARD_ADMIN_URLS` owner connections to distribute title
+rows deterministically by TMDB ID. `DATABASE_URL` remains the control database for page manifests,
+leases, payload caches, support, analytics, and rate limits. Migrations, role provisioning,
+verification, scheduled refreshes, keyed detail reads, search, and similar-title reads understand
+the shard layout. Do not enable physical shards for a small catalog purely for speed; the default
+single-shard path uses one-query page reads and avoids cross-database fan-out.
+
+Before deploying a new shard layout, migrate and provision every shard, set
+`CATALOG_RESHARD_SOURCE_URL` to the existing catalog database, and run
+`npm run db:reshard-catalog`. The bounded keyset backfill copies genres, titles, persisted details,
+and title-genre relations into their deterministic target shards.
+
+External playback is disabled unless both `ENABLE_EXTERNAL_STREAM_RESOLVER=true` and
 `STREAMING_RIGHTS_CONFIRMED=true` are configured. Do not enable it without documented distribution
 rights.
 
-The public support form stores tickets in Postgres. Set `ADMIN_PASSWORD` to enable the `/admin`
+The public support form stores tickets in Postgres. Set a 16+ character `ADMIN_PASSWORD` to enable the `/admin`
 operations dashboard, and set `ENABLE_PRODUCT_ANALYTICS=true` to collect minimal first-party product
 events for its charts. Daily cleanup retains analytics for 90 days and removes resolved support
 tickets after 180 days. Stream provider endpoints can be changed with `MOVIEBOX_API_HOSTS`,

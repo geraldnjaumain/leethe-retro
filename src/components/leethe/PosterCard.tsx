@@ -1,6 +1,8 @@
 import { Link } from "@tanstack/react-router";
-import { LogoDot } from "@/components/leethe/Nav";
-import { poster, title, year, type MediaType, type TmdbItem } from "@/lib/tmdb";
+import { useQueryClient } from "@tanstack/react-query";
+import { MediaPlaceholder } from "@/components/leethe/VisualAssets";
+import { fetchDetail, poster, title, year, type MediaType, type TmdbItem } from "@/lib/tmdb";
+import { useCallback } from "react";
 
 export function PosterCard({
   item,
@@ -13,16 +15,36 @@ export function PosterCard({
   delay?: number;
   aspect?: string;
 }) {
+  const queryClient = useQueryClient();
   const img = poster(item.poster_path, "w500");
   const t = title(item);
   const y = year(item);
   const rating = item.vote_average ? item.vote_average.toFixed(1) : "NR";
+  const prefetchDetail = useCallback(() => {
+    const queryKey = ["detail", type, String(item.id)];
+    if (!queryClient.getQueryData(queryKey)) {
+      queryClient.setQueryData(queryKey, {
+        ...item,
+        genres: [],
+      });
+    }
+    void queryClient.prefetchQuery({
+      queryKey,
+      queryFn: () => fetchDetail(type, item.id),
+      staleTime: 60_000,
+    });
+  }, [queryClient, type, item]);
 
   return (
     <Link
       to="/title/$type/$id"
       params={{ type, id: String(item.id) }}
+      preload="intent"
       aria-label={`Open ${t}${y ? `, ${y}` : ""}`}
+      onClick={prefetchDetail}
+      onFocus={prefetchDetail}
+      onPointerDown={prefetchDetail}
+      onPointerEnter={prefetchDetail}
       className="poster-card poster-preview-card animate-fade-up relative mx-auto flex w-full max-w-[280px] min-w-0 flex-col overflow-hidden rounded-[5px] outline-none focus-visible:ring-2 focus-visible:ring-[oklch(0.7_0.16_240/0.7)] focus-visible:ring-offset-2 focus-visible:ring-offset-background min-[520px]:max-w-none"
       style={{ animationDelay: `${delay}ms` }}
     >
@@ -40,20 +62,16 @@ export function PosterCard({
             src={img}
             alt={t}
             loading="lazy"
+            decoding="async"
             className="poster-preview-image absolute inset-0 h-full w-full object-cover"
           />
         ) : (
-          <div className="absolute inset-0 grid place-items-center bg-[radial-gradient(circle_at_50%_35%,oklch(0.28_0.008_250),oklch(0.14_0.006_250))] text-center">
-            <div className="flex flex-col items-center gap-2 text-[10px] text-muted-foreground">
-              <LogoDot className="opacity-70" />
-              <span>Poster unavailable</span>
-            </div>
-          </div>
+          <MediaPlaceholder label="Poster unavailable" className="absolute inset-0" />
         )}
 
         <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 h-28 bg-gradient-to-t from-black/85 via-black/35 to-transparent" />
         <div className="pointer-events-none absolute inset-x-0 top-0 z-20 h-1/2 bg-[linear-gradient(145deg,rgba(255,255,255,0.22)_0%,rgba(255,255,255,0.08)_28%,rgba(255,255,255,0)_50%)] opacity-70" />
-        <div className="poster-preview-sheen pointer-events-none absolute -right-1/3 top-0 z-30 h-full w-1/3 skew-x-12 bg-gradient-to-r from-transparent via-white/[0.18] to-transparent opacity-0" />
+        <div className="poster-preview-sheen pointer-events-none absolute right-0 top-0 z-30 h-full w-1/3 translate-x-full skew-x-12 bg-gradient-to-r from-transparent via-white/[0.18] to-transparent opacity-0" />
 
         <div className="poster-preview-titlebar absolute inset-x-0 bottom-0 z-30 p-2">
           <div className="line-clamp-1 text-[12px] font-semibold leading-tight text-white drop-shadow-[0_1px_2px_oklch(0_0_0/0.8)]">

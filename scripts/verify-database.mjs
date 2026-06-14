@@ -1,5 +1,6 @@
 import { neon } from "@neondatabase/serverless";
 import { randomUUID } from "node:crypto";
+import { catalogShardAppUrls } from "./lib/catalog-shards.mjs";
 
 const adminUrl = process.env.DATABASE_ADMIN_URL;
 const appUrl = process.env.DATABASE_URL;
@@ -13,8 +14,10 @@ const requiredMigrations = [
   "003_job_leases.sql",
   "004_tmdb_payload_cache.sql",
   "005_product_operations.sql",
+  "006_admin_audit.sql",
 ];
 const requiredPermissions = {
+  admin_audit_events: ["SELECT", "INSERT"],
   analytics_events: ["SELECT", "INSERT"],
   catalog_pages: ["SELECT", "INSERT", "UPDATE"],
   catalog_sync_events: ["SELECT", "INSERT"],
@@ -76,8 +79,25 @@ assert(
   "One or more required database tables are missing.",
 );
 
-const [catalog] = await app.query("SELECT count(*)::integer AS count FROM media_titles");
-assert(Number(catalog.count) > 0, "The production catalog is empty.");
+const shardCatalogs = await Promise.all(
+  catalogShardAppUrls().map(async (url, shardIndex) => {
+    const shard = neon(url);
+    const [migrationCount] = await shard.query(
+      `SELECT count(*)::integer AS count
+       FROM schema_migrations
+       WHERE name = ANY($1::text[])`,
+      [requiredMigrations],
+    );
+    assert(
+      Number(migrationCount.count) === requiredMigrations.length,
+      `Catalog shard ${shardIndex} is missing one or more required migrations.`,
+    );
+    const [catalog] = await shard.query("SELECT count(*)::integer AS count FROM media_titles");
+    return Number(catalog.count);
+  }),
+);
+const catalogTitleCount = shardCatalogs.reduce((sum, count) => sum + count, 0);
+assert(catalogTitleCount > 0, "The production catalog is empty.");
 
 const permissions = await app.query(
   `SELECT table_name,
@@ -121,6 +141,7 @@ console.log(
     appRole: appIdentity.current_user,
     migrations: migrations.length,
     tables: tables.length,
-    titles: Number(catalog.count),
+    catalogShards: shardCatalogs.length,
+    titles: catalogTitleCount,
   }),
 );

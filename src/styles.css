@@ -1,5 +1,4 @@
-@import "tailwindcss" source(none);
-@source "../src";
+@import "tailwindcss";
 @import "tw-animate-css";
 
 @custom-variant dark (&:is(.dark *));
@@ -102,6 +101,12 @@
     background-attachment: fixed;
   }
 
+  @media (max-width: 720px) {
+    body {
+      background-attachment: scroll;
+    }
+  }
+
   button,
   input,
   select,
@@ -167,12 +172,30 @@
   box-shadow: var(--shadow-card);
 }
 
+@utility metallic-wordmark {
+  display: inline-block;
+  color: transparent;
+  background-image: linear-gradient(
+    to bottom,
+    oklch(0.98 0.004 245) 0%,
+    oklch(0.78 0.012 245) 42%,
+    oklch(0.98 0.004 245) 52%,
+    oklch(0.56 0.016 245) 100%
+  );
+  background-clip: text;
+  -webkit-background-clip: text;
+  font-weight: 700;
+  letter-spacing: -0.055em;
+  line-height: 1;
+  text-shadow:
+    0 1px 0 oklch(1 0 0 / 0.15),
+    0 2px 3px oklch(0 0 0 / 0.65);
+}
+
 @utility poster-card {
   background: var(--card);
   border: 1px solid oklch(0.12 0.005 250);
   box-shadow: var(--shadow-card);
-  backface-visibility: hidden;
-  transform: translateZ(0);
   transform-origin: center center;
   transition:
     transform 400ms var(--ease-retro),
@@ -189,7 +212,7 @@
 
   & .poster-preview-sheen {
     transition:
-      right 900ms ease-out,
+      transform 900ms ease-out,
       opacity 900ms ease-out;
   }
 
@@ -213,7 +236,7 @@
   }
 
   &:focus-visible .poster-preview-sheen {
-    right: 120%;
+    transform: translateX(-200%);
     opacity: 1;
   }
 
@@ -242,7 +265,7 @@
     }
 
     &:hover .poster-preview-sheen {
-      right: 120%;
+      transform: translateX(-200%);
       opacity: 1;
     }
 
@@ -277,6 +300,12 @@
     0 1px 0 oklch(1 0 0 / 0.05);
   border-radius: 999px;
   color: var(--foreground);
+
+  &:focus-within {
+    border-color: oklch(0.62 0.1 245);
+    outline: none;
+    box-shadow: 0 1px 1px oklch(0 0 0 / 0.35) inset;
+  }
 }
 
 @utility scrollbar-none {
@@ -360,7 +389,7 @@
   }
 
   & > select:focus-visible {
-    box-shadow: 0 0 0 1px oklch(0.62 0.1 245 / 0.55);
+    outline: none;
   }
 
   & option {
@@ -370,6 +399,8 @@
 }
 
 @utility support-field {
+  appearance: none;
+  -webkit-appearance: none;
   display: block;
   width: 100%;
   border-radius: 5px;
@@ -379,13 +410,12 @@
   color: var(--foreground);
   font-size: 12px;
   outline: none;
-  box-shadow:
-    0 1px 2px oklch(0 0 0 / 0.45) inset,
-    0 1px 0 oklch(1 0 0 / 0.04);
+  box-shadow: none;
 
-  &:focus {
+  &:focus-visible {
     border-color: oklch(0.58 0.14 240);
-    box-shadow: 0 0 0 2px oklch(0.58 0.14 240 / 0.2);
+    outline: none;
+    box-shadow: none;
   }
 
   &::placeholder {
@@ -393,29 +423,12 @@
   }
 }
 
-@utility admin-select {
-  appearance: none;
-  -webkit-appearance: none;
-  border-radius: 999px;
-  border: 1px solid oklch(0.1 0.005 250);
-  background-color: oklch(0.16 0.008 250);
-  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='rgba(255, 255, 255, 0.7)' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 8l4 4 4-4'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 0.5rem center;
-  background-size: 1rem;
-  padding: 0.25rem 1.75rem 0.25rem 0.5rem;
-  color: var(--foreground);
-  font-size: 9px;
-  outline: none;
-  cursor: pointer;
-
-  &:focus-visible {
-    box-shadow: 0 0 0 2px oklch(0.62 0.1 245 / 0.4);
-  }
-}
-
 @utility player-shell {
   isolation: isolate;
+
+  &:focus-within .player-controls {
+    opacity: 1;
+  }
 
   & video {
     cursor: pointer;
@@ -590,15 +603,6 @@
   transform: translateY(0);
 }
 
-@utility focus-ring {
-  outline: none;
-}
-
-@utility focus-ring-visible {
-  outline: 2px solid oklch(0.7 0.16 240 / 0.7);
-  outline-offset: 2px;
-}
-
 @keyframes leethe-fade-up {
   from {
     opacity: 0.86;
@@ -666,228 +670,27 @@
   animation: leethe-shimmer 1.6s linear infinite;
 }
 
-.reel-companion {
-  position: fixed;
-  right: 0.75rem;
-  bottom: 0.75rem;
-  z-index: 70;
-  pointer-events: none;
-}
-
-.reel-companion-launcher {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  pointer-events: auto;
-}
-
-.reel-companion-button {
-  display: block;
-  border: 0;
-  background: transparent;
-  padding: 0;
-  filter: drop-shadow(0 9px 8px oklch(0 0 0 / 0.5));
-  cursor: pointer;
-  transition:
-    transform 220ms var(--ease-retro),
-    filter 220ms var(--ease-retro);
-}
-
-.reel-companion-button:hover {
-  transform: translateY(-3px) scale(1.03);
-  filter: drop-shadow(0 13px 11px oklch(0 0 0 / 0.6));
-}
-
-.reel-companion-button:active {
-  transform: translateY(1px) scale(0.98);
-}
-
-.reel-sprite {
-  display: block;
-  width: 96px;
-  height: 104px;
-  background-image: url("/pets/reel-spritesheet.webp");
-  background-repeat: no-repeat;
-  background-size: 768px 936px;
-  image-rendering: auto;
-  animation: reel-idle 2.8s steps(1, end) infinite;
-}
-
-.reel-sprite-waving {
-  animation: reel-wave 1.15s steps(1, end) infinite;
-}
-
-.reel-sprite-waiting {
-  animation: reel-waiting 1.5s steps(1, end) infinite;
-}
-
-.reel-sprite-running {
-  animation: reel-working 1.2s steps(1, end) infinite;
-}
-
-.reel-sprite-review {
-  animation: reel-review 1.4s steps(1, end) infinite;
-}
-
-.reel-companion-panel {
-  position: fixed;
-  right: 0.75rem;
-  bottom: 7.25rem;
-  width: min(19rem, calc(100vw - 1.5rem));
-  max-height: calc(100vh - 8rem);
-  overflow-y: auto;
-  border-radius: 0.55rem;
-  pointer-events: auto;
-}
-
-.reel-companion-titlebar {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0.45rem 0.65rem;
-}
-
-.reel-readout {
-  border: 1px solid oklch(0.1 0.005 250);
-  border-radius: 0.35rem;
-  background:
-    linear-gradient(oklch(0.08 0.015 220 / 0.25), oklch(0.03 0.01 220 / 0.25)),
-    repeating-linear-gradient(
-      to bottom,
-      oklch(0.8 0.08 210 / 0.035) 0,
-      oklch(0.8 0.08 210 / 0.035) 1px,
-      transparent 1px,
-      transparent 3px
-    );
-  padding: 0.55rem 0.65rem;
-  box-shadow:
-    0 2px 5px oklch(0 0 0 / 0.45) inset,
-    0 1px 0 oklch(1 0 0 / 0.04);
-}
-
-@keyframes reel-idle {
-  0%,
-  100% {
-    background-position: 0 0;
-  }
-  16% {
-    background-position: -96px 0;
-  }
-  32% {
-    background-position: -192px 0;
-  }
-  48% {
-    background-position: -288px 0;
-  }
-  64% {
-    background-position: -384px 0;
-  }
-  80% {
-    background-position: -480px 0;
-  }
-}
-
-@keyframes reel-wave {
-  0%,
-  100% {
-    background-position: 0 -312px;
-  }
-  25% {
-    background-position: -96px -312px;
-  }
-  50% {
-    background-position: -192px -312px;
-  }
-  75% {
-    background-position: -288px -312px;
-  }
-}
-
-@keyframes reel-waiting {
-  0%,
-  100% {
-    background-position: 0 -624px;
-  }
-  16% {
-    background-position: -96px -624px;
-  }
-  32% {
-    background-position: -192px -624px;
-  }
-  48% {
-    background-position: -288px -624px;
-  }
-  64% {
-    background-position: -384px -624px;
-  }
-  80% {
-    background-position: -480px -624px;
-  }
-}
-
-@keyframes reel-working {
-  0%,
-  100% {
-    background-position: 0 -728px;
-  }
-  16% {
-    background-position: -96px -728px;
-  }
-  32% {
-    background-position: -192px -728px;
-  }
-  48% {
-    background-position: -288px -728px;
-  }
-  64% {
-    background-position: -384px -728px;
-  }
-  80% {
-    background-position: -480px -728px;
-  }
-}
-
-@keyframes reel-review {
-  0%,
-  100% {
-    background-position: 0 -832px;
-  }
-  16% {
-    background-position: -96px -832px;
-  }
-  32% {
-    background-position: -192px -832px;
-  }
-  48% {
-    background-position: -288px -832px;
-  }
-  64% {
-    background-position: -384px -832px;
-  }
-  80% {
-    background-position: -480px -832px;
-  }
-}
-
 @media (hover: none) and (pointer: coarse) {
   .poster-preview-card:hover {
     z-index: auto;
-    transform: translateZ(0);
+    transform: none;
     box-shadow: var(--shadow-card);
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+  }
+
   .poster-preview-card,
   .poster-preview-card * {
     animation-duration: 1ms !important;
     transition-duration: 1ms !important;
-  }
-
-  .reel-sprite {
-    animation: none !important;
   }
 }

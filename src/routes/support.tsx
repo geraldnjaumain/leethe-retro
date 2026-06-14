@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState, type FormEvent } from "react";
-import { LogoDot } from "@/components/leethe/Nav";
+import { BrandMark } from "@/components/leethe/VisualAssets";
 import { submitSupportTicket, type SupportCategory } from "@/lib/product";
 
 type SupportSearch = {
@@ -103,7 +103,7 @@ function SupportPage() {
     <main className="mx-auto min-h-screen max-w-[1040px] px-3 py-5 sm:px-4 sm:py-8">
       <header className="nav-aluminum brushed mb-5 flex items-center justify-between rounded-md border border-[var(--aluminum-line)] px-3 py-2">
         <Link to="/" className="flex items-center gap-2 text-foreground">
-          <LogoDot />
+          <BrandMark />
           <span className="text-[13px] font-semibold">leethe support</span>
         </Link>
         <Link to="/" className="chip-pill chip-pill-interactive rounded-full px-3 py-1 text-[11px]">
@@ -135,7 +135,7 @@ function SupportPage() {
                 <label
                   key={item.value}
                   className={[
-                    "cursor-pointer rounded-md border px-3 py-2 transition-colors",
+                    "cursor-pointer rounded-md border px-3 py-2 transition-colors has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-primary",
                     category === item.value
                       ? "border-[oklch(0.55_0.16_245/0.8)] bg-[oklch(0.2_0.03_245)]"
                       : "border-[var(--aluminum-line)] bg-black/15 hover:bg-white/5",
@@ -178,7 +178,10 @@ function SupportPage() {
               minLength={12}
               maxLength={4000}
               value={message}
-              onChange={(event) => setMessage(event.target.value)}
+              onChange={(event) => {
+                setMessage(event.target.value);
+                if (ticketId) setTicketId("");
+              }}
               placeholder="Describe what you expected, what happened, and any steps that reproduce the issue."
               className="support-field mt-1 min-h-36 resize-y"
             />
@@ -188,12 +191,18 @@ function SupportPage() {
           </label>
 
           {ticketId ? (
-            <div className="mt-4 rounded-md border border-[oklch(0.55_0.14_145/0.55)] bg-[oklch(0.2_0.04_145/0.5)] px-3 py-2 text-[11px] text-foreground">
+            <div
+              role="status"
+              className="mt-4 rounded-md border border-[oklch(0.55_0.14_145/0.55)] bg-[oklch(0.2_0.04_145/0.5)] px-3 py-2 text-[11px] text-foreground"
+            >
               Report received. Reference: <strong>{ticketId}</strong>
             </div>
           ) : null}
           {error ? (
-            <div className="mt-4 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-[11px] text-foreground">
+            <div
+              role="alert"
+              className="mt-4 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-[11px] text-foreground"
+            >
               {error}
             </div>
           ) : null}

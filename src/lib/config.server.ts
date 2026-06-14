@@ -7,7 +7,6 @@ export function getServerConfig() {
     legalContactEmail: envValue("LEGAL_CONTACT_EMAIL") ?? "legal@example.com",
     productAnalyticsEnabled: envFlag("ENABLE_PRODUCT_ANALYTICS"),
     externalStreamResolverEnabled:
-      !isProduction() ||
-      (envFlag("ENABLE_EXTERNAL_STREAM_RESOLVER") && envFlag("STREAMING_RIGHTS_CONFIRMED")),
+      envFlag("ENABLE_EXTERNAL_STREAM_RESOLVER") && envFlag("STREAMING_RIGHTS_CONFIRMED"),
   };
 }

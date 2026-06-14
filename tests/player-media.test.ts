@@ -2,9 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   audioKey,
   downloadFileName,
+  episodeDownloadFileName,
   findPreferredStreamIndex,
   isDirectDownload,
+  nextEpisodeTarget,
+  normalizePlaybackPreferences,
   normalizeCaptionCandidates,
+  selectPreferredDownloadOption,
   srtToVtt,
 } from "../src/lib/player-media";
 
@@ -55,5 +59,43 @@ describe("player media helpers", () => {
     expect(isDirectDownload("https://cdn.example.com/movie.mp4")).toBe(true);
     expect(isDirectDownload("https://cdn.example.com/master.m3u8?token=1")).toBe(false);
     expect(downloadFileName("Movie: Part II", "1080p")).toBe("Movie-Part-II-1080p.mp4");
+    expect(episodeDownloadFileName("Series!", 1, 2, "A New Day", "1080p")).toBe(
+      "Series-S01E02-A-New-Day-1080p.mp4",
+    );
+  });
+
+  it("selects the requested audio and nearest available download quality", () => {
+    const options = [
+      { quality: "720p", resolution: 720, audioLabel: "English" },
+      { quality: "1080p", resolution: 1080, audioLabel: "Hindi" },
+      { quality: "2160p", resolution: 2160, audioLabel: "English" },
+    ];
+    expect(selectPreferredDownloadOption(options, "1080p", "English")).toEqual(options[0]);
+    expect(selectPreferredDownloadOption(options, "1080p", "Hindi")).toEqual(options[1]);
+    expect(selectPreferredDownloadOption(options, "1080p", "French")).toEqual(options[1]);
+  });
+
+  it("normalizes playback preferences and rejects unsupported rates", () => {
+    expect(
+      normalizePlaybackPreferences({
+        autoplayVideo: false,
+        autoplayNext: false,
+        playbackRate: 1.5,
+      }),
+    ).toEqual({ autoplayVideo: false, autoplayNext: false, playbackRate: 1.5 });
+    expect(normalizePlaybackPreferences({ playbackRate: 99 }).playbackRate).toBe(1);
+  });
+
+  it("selects the next episode and advances to the next season", () => {
+    const seasons = [{ season_number: 1 }, { season_number: 2 }];
+    expect(
+      nextEpisodeTarget(1, 1, [{ episode_number: 1 }, { episode_number: 2 }], seasons),
+    ).toEqual({ season: 1, episode: 2 });
+    expect(
+      nextEpisodeTarget(1, 2, [{ episode_number: 1 }, { episode_number: 2 }], seasons),
+    ).toEqual({
+      season: 2,
+      episode: 1,
+    });
   });
 });
